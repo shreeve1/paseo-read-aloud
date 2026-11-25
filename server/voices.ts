@@ -1,7 +1,9 @@
 /// <reference types="node" />
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import type { VoiceSettings } from "../shared/settings";
+import { readKey } from "./elevenlabs-key";
+import { paseoHome } from "./paths";
 
 /**
  * Picks the same voice Paseo's voice mode uses, in Paseo's own order:
@@ -29,7 +31,8 @@ interface VoiceSpec {
 
 export type ResolvedVoice =
   | { provider: "local"; modelId: string; label: string; dir: string; engine: TtsEngine; speakerId: number; speed: number }
-  | { provider: "openai"; apiKey?: string; endpoint: string; model: string; voice: string };
+  | { provider: "openai"; apiKey?: string; endpoint: string; model: string; voice: string }
+  | { provider: "elevenlabs"; apiKey?: string; voiceId: string; voiceName: string; model: string; speed: number };
 
 const DEFAULT_LOCAL_TTS_MODEL = "kokoro-en-v0_19";
 
@@ -113,10 +116,6 @@ function defaultModelId(): string {
   return readLiveCatalog()?.DEFAULT_LOCAL_TTS_MODEL ?? DEFAULT_LOCAL_TTS_MODEL;
 }
 
-export function paseoHome(): string {
-  return process.env.PASEO_HOME ?? path.join(os.homedir(), ".paseo");
-}
-
 export type DaemonConfig = {
   features?: { voiceMode?: { tts?: Record<string, unknown> } };
   providers?: { local?: { modelsDir?: unknown } };
@@ -140,8 +139,28 @@ function first(...values: unknown[]): string | undefined {
   return undefined;
 }
 
-/** The voice Paseo would use for text to speech right now. */
-export function resolveVoice(env: NodeJS.ProcessEnv = process.env, config: DaemonConfig = readDaemonConfig()): ResolvedVoice {
+export function pickAgentVoice({ voiceId, voiceName, agentVoices }: VoiceSettings["elevenlabs"], agentId?: string) {
+  const main = { id: voiceId, name: voiceName };
+  if (!voiceId || !agentId || !agentVoices.length) return main;
+  let hash = 0;
+  for (let i = 0; i < agentId.length; i++) hash = (Math.imul(31, hash) + agentId.charCodeAt(i)) >>> 0;
+  return [main, ...agentVoices][hash % (agentVoices.length + 1)];
+}
+
+/** The plugin's ElevenLabs selection takes precedence over Paseo's speech settings. */
+export function resolveVoice(
+  { env = process.env, config, settings, agentId }: {
+    env?: NodeJS.ProcessEnv; config?: DaemonConfig; settings?: VoiceSettings; agentId?: string;
+  } = {},
+): ResolvedVoice {
+  if (settings?.provider === "elevenlabs") {
+    const { id: voiceId, name: voiceName } = pickAgentVoice(settings.elevenlabs, agentId);
+    return {
+      provider: "elevenlabs", apiKey: readKey(env).apiKey, voiceId, voiceName,
+      model: settings.elevenlabs.model, speed: settings.elevenlabs.speed,
+    };
+  }
+  config ??= readDaemonConfig();
   const tts = config.features?.voiceMode?.tts ?? {};
   const provider = first(env.PASEO_VOICE_TTS_PROVIDER, tts.provider) ?? "local";
 

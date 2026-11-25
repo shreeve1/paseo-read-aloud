@@ -2,9 +2,9 @@
   "id": "read-aloud",
   "name": "Read Aloud",
   "icon": "assets/icon.png",
-  "description": "Adds a read-aloud button to assistant replies, spoken with the voice selected in Paseo's voice settings (any local voice Paseo downloads, or OpenAI TTS).",
+  "description": "Reads assistant replies with an ElevenLabs voice or the local or OpenAI voice selected in Paseo.",
   "requirements": {
-    "paseo": ">=0.15.4"
+    "paseo": ">=0.17.0"
   },
   "media": [
     "assets/screenshot.png"

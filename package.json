@@ -24,7 +24,7 @@
     "test": "node --import ./test/resolve-ts.mjs --experimental-strip-types --no-warnings --test test/*.test.ts"
   },
   "devDependencies": {
-    "@getpaseo/plugin": "0.15.4",
+    "@getpaseo/plugin": "0.17.3",
     "@types/node": "^24.0.0",
     "@types/react": "~19.2.0",
     "react": "19.1.0",

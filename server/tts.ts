@@ -3,11 +3,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
-import type { SpeechFile, SpeechRequest } from "../shared/speech";
+import type { VoiceSettings } from "../shared/settings";
+import type { SpeechFile, SpeechRequest, VoiceStatus } from "../shared/speech";
+import { ELEVENLABS_API, ELEVENLABS_SETTINGS, elevenLabsError } from "./elevenlabs";
 import { readDaemonConfig, requiredFiles, resolveVoice, type ResolvedVoice, type TtsEngine } from "./voices";
 
 type LocalVoice = Extract<ResolvedVoice, { provider: "local" }>;
 type OpenAiVoice = Extract<ResolvedVoice, { provider: "openai" }>;
+type ElevenLabsVoice = Extract<ResolvedVoice, { provider: "elevenlabs" }>;
 
 const PLUGIN_ID = "read-aloud";
 
@@ -41,6 +44,7 @@ export async function cancel({ session }: { session: string }): Promise<{ ok: bo
 const REQUEST_TIMEOUT_MS = 60_000;
 const CLOUD_SAMPLE_RATE = 24_000;
 const mp3Endpoints = new Set<string>();
+const modelsWithoutContext = new Set<string>();
 
 async function withSpeechRequest(
   provider: string, session: string | undefined, request: (signal: RequestInit["signal"]) => Promise<SpeechFile>,
@@ -78,7 +82,7 @@ async function synthesizeOpenAi(voice: OpenAiVoice, text: string, session?: stri
       body: JSON.stringify({ model: voice.model, voice: voice.voice, input: text, response_format: format }),
       signal,
     });
-    let format = mp3Endpoints.has(voice.endpoint) ? "mp3" as const : "pcm" as const;
+    let format: "mp3" | "pcm" = mp3Endpoints.has(voice.endpoint) ? "mp3" : "pcm";
     let response = await request(format);
     if (!response.ok) {
       const detail = await response.text();
@@ -101,6 +105,36 @@ async function synthesizeOpenAi(voice: OpenAiVoice, text: string, session?: stri
 function openAiError(status: number, body: string): Error {
   const detail = body.slice(0, 200).trim();
   return new Error(`OpenAI TTS request failed (${status})${detail ? ": " + detail : ""}`);
+}
+
+async function synthesizeElevenLabs(voice: ElevenLabsVoice, { text, session, previous, next }: SpeechRequest): Promise<SpeechFile> {
+  const { apiKey, voiceId, model, speed } = voice;
+  if (!apiKey) throw new Error("No ElevenLabs API key is configured. " + ELEVENLABS_SETTINGS);
+  if (!voiceId) throw new Error("Choose an ElevenLabs voice. " + ELEVENLABS_SETTINGS);
+  const url = `${ELEVENLABS_API}/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=pcm_24000`;
+  const body = { text, model_id: model, voice_settings: { speed } };
+  return withSpeechRequest("ElevenLabs", session, async (signal) => {
+    const request = (context: boolean) => fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "xi-api-key": apiKey },
+      body: JSON.stringify(context ? { ...body, previous_text: previous, next_text: next } : body),
+      signal,
+    }).catch(() => { throw new Error("Could not reach ElevenLabs for speech"); });
+    const withContext = Boolean(previous || next) && !modelsWithoutContext.has(model);
+    let response = await request(withContext);
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      if (withContext && (response.status === 400 || response.status === 422) && /\b(?:previous_text|next_text)\b/i.test(detail)) {
+        modelsWithoutContext.add(model);
+        response = await request(false);
+      } else {
+        throw elevenLabsError(response.status, detail, apiKey, true);
+      }
+    }
+    if (!response.ok) throw elevenLabsError(response.status, await response.text().catch(() => ""), apiKey, true);
+    const pcm = await response.arrayBuffer().catch(() => { throw new Error("Could not read ElevenLabs audio"); });
+    return pcm16Clip(pcm);
+  });
 }
 
 // ---------- Local voices ----------
@@ -320,25 +354,28 @@ async function synthesizeLocal(voice: LocalVoice, text: string, session?: string
   return pcmClip(audio.samples, audio.sampleRate);
 }
 
-/** Speaks one chunk with the voice chosen in Paseo's voice settings. */
-export async function synthesize({ text, session, localOnly }: SpeechRequest): Promise<SpeechFile> {
+/** Speaks one chunk with the configured voice. */
+export async function synthesize(input: SpeechRequest, settings?: VoiceSettings): Promise<SpeechFile> {
+  const { text, session, localOnly, agentId } = input;
   if (!text.trim()) throw new Error("Nothing to read aloud");
   if (isCancelled(session)) throw new Cancelled();
-  const voice = resolveVoice();
+  const voice = resolveVoice({ settings, agentId });
   // Cached client status can be stale when the voice settings change.
   if (localOnly && voice.provider !== "local") throw new Error("Only local voices can be prefetched");
-  return voice.provider === "openai" ? synthesizeOpenAi(voice, text, session) : synthesizeLocal(voice, text, session);
+  switch (voice.provider) {
+    case "openai": return synthesizeOpenAi(voice, text, session);
+    case "elevenlabs": return synthesizeElevenLabs(voice, input);
+    case "local": return synthesizeLocal(voice, text, session);
+  }
 }
 
 const SPEAKING_SETTINGS = "Open Paseo Settings, choose Voice, and find Voice mode > Speaking.";
 
-/** Checks the voice Paseo would use and says how to fix any problem; warms a working local voice. */
-type Status = { ok: boolean; voice: string; provider?: "local" | "openai" | "unknown"; problem?: string; steps?: string[] };
-
-export async function checkVoice(): Promise<Status> {
+/** Checks the configured voice and says how to fix any problem; warms a working local voice. */
+export async function checkVoice(settings?: VoiceSettings): Promise<VoiceStatus> {
   let voice: ResolvedVoice;
   try {
-    voice = resolveVoice();
+    voice = resolveVoice({ settings });
   } catch (error) {
     return {
       ok: false,
@@ -347,6 +384,14 @@ export async function checkVoice(): Promise<Status> {
       problem: error instanceof Error ? error.message : "Paseo's voice settings couldn't be read.",
       steps: [SPEAKING_SETTINGS, "Set Provider to Local or OpenAI and pick a voice from the Model list.", "Tap this warning again to re-check."],
     };
+  }
+  if (voice.provider === "elevenlabs") {
+    const label = voice.voiceName || voice.voiceId || "ElevenLabs";
+    const problem = !voice.apiKey ? "No ElevenLabs API key is configured."
+      : !voice.voiceId ? "No ElevenLabs voice is selected." : undefined;
+    return problem
+      ? { ok: false, voice: label, provider: "elevenlabs", problem, steps: [ELEVENLABS_SETTINGS] }
+      : { ok: true, voice: label, provider: "elevenlabs" };
   }
   if (voice.provider === "openai") {
     if (voice.apiKey) return { ok: true, voice: `OpenAI ${voice.voice}`, provider: "openai" };
