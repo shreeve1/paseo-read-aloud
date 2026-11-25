@@ -6,7 +6,11 @@ export const voiceSettings = defineSettings({
   scope: "host",
   version: 1,
   schema: z.object({
-    provider: z.enum(["paseo", "elevenlabs"]).default("paseo"),
+    provider: z.enum(["paseo", "elevenlabs", "managed"]).default("paseo"),
+    managed: z.object({
+      voiceId: z.string().default(""),
+      voiceName: z.string().default(""),
+    }).prefault({}),
     elevenlabs: z.object({
       voiceId: z.string().default(""),
       voiceName: z.string().default(""),

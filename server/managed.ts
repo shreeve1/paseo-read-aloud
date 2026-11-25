@@ -6,6 +6,7 @@ import { isIP } from "node:net";
 import { URL } from "node:url";
 import { promisify } from "node:util";
 import { z } from "zod";
+import { managedVoices } from "../shared/managed";
 import protocol from "../shared/hub-protocol-v1.json" with { type: "json" };
 
 type ManagedPaths = { config: string; ca: string; helper: string };
@@ -21,7 +22,6 @@ export type Mode =
   | { kind: "managed-unavailable"; reason: string };
 
 const configSchema = z.strictObject({ version: z.literal(protocol.version), origin: z.url() });
-export const hubVoicesSchema = z.object({ voices: z.array(z.object({ id: z.string(), name: z.string() })) });
 const hubErrorSchema = z.object({ error: z.object({ code: z.string(), message: z.string() }) });
 const bearerPattern = new RegExp(protocol.transport.bearer_pattern);
 const runFile = promisify(execFile);
@@ -143,9 +143,9 @@ export class HubClient {
     this.ownerUid = ownerUid;
   }
 
-  async voices(): Promise<z.output<typeof hubVoicesSchema>> {
+  async voices(): Promise<z.output<typeof managedVoices.output>> {
     const body = await this.send(protocol.routes.voices);
-    const result = hubVoicesSchema.safeParse(decodeJson(body));
+    const result = managedVoices.output.safeParse(decodeJson(body));
     if (!result.success) throw new HubError("invalid_response");
     return result.data;
   }

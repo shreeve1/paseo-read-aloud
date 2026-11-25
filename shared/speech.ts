@@ -17,6 +17,7 @@ export const synthesizeSpeech = defineRpc({
     previous: z.string().max(1000).optional(),
     next: z.string().max(1000).optional(),
     localOnly: z.boolean().optional(),
+    automatic: z.boolean().optional(),
   }),
   output: z.object({ base64: z.string(), mimeType: z.string(), durationMs: z.number().optional() }),
 });
@@ -37,7 +38,7 @@ export const voiceStatus = defineRpc({
   output: z.object({
     ok: z.boolean(),
     voice: z.string(),
-    provider: z.enum(["local", "openai", "elevenlabs", "unknown"]).optional(),
+    provider: z.enum(["local", "openai", "elevenlabs", "managed", "unknown"]).optional(),
     problem: z.string().optional(),
     steps: z.array(z.string()).optional(),
   }),

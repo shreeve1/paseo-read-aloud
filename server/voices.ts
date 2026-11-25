@@ -152,13 +152,16 @@ export function pickAgentVoice({ voiceId, voiceName, agentVoices }: VoiceSetting
   return [main, ...agentVoices][hash % (agentVoices.length + 1)];
 }
 
+const LOCAL_VOICE_REQUIRED = "Only local voices are available for this request. Set Paseo Voice mode > Speaking to Local.";
+
 /** The plugin's ElevenLabs selection takes precedence over Paseo's speech settings. */
 export function resolveVoice(
-  { env = process.env, config, settings, agentId }: {
-    env?: NodeJS.ProcessEnv; config?: DaemonConfig; settings?: VoiceSettings; agentId?: string;
+  { env = process.env, config, settings, agentId, localOnly }: {
+    env?: NodeJS.ProcessEnv; config?: DaemonConfig; settings?: VoiceSettings; agentId?: string; localOnly?: boolean;
   } = {},
 ): ResolvedVoice {
   if (settings?.provider === "elevenlabs") {
+    if (localOnly) throw new Error(LOCAL_VOICE_REQUIRED);
     const { id: voiceId, name: voiceName } = pickAgentVoice(settings.elevenlabs, agentId);
     return {
       provider: "elevenlabs", apiKey: readKey(env).apiKey, voiceId, voiceName,
@@ -169,6 +172,7 @@ export function resolveVoice(
   const tts = config.features?.voiceMode?.tts ?? {};
   const provider = first(env.PASEO_VOICE_TTS_PROVIDER, tts.provider) ?? "local";
 
+  if (localOnly && provider !== "local") throw new Error(LOCAL_VOICE_REQUIRED);
   if (provider === "openai") {
     const openai = tts.provider === "openai" ? tts : {};
     // Same base URL convention as Paseo's OpenAI client: it already ends in /v1.

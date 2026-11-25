@@ -6,6 +6,7 @@ import { createRequire } from "node:module";
 import type { VoiceSettings } from "../shared/settings";
 import type { SpeechFile, SpeechRequest, VoiceStatus } from "../shared/speech";
 import { ELEVENLABS_API, ELEVENLABS_SETTINGS, elevenLabsError } from "./elevenlabs";
+import type { HubClient } from "./managed";
 import { readDaemonConfig, requiredFiles, resolveVoice, type ResolvedVoice, type TtsEngine } from "./voices";
 
 type LocalVoice = Extract<ResolvedVoice, { provider: "local" }>;
@@ -47,7 +48,7 @@ const mp3Endpoints = new Set<string>();
 const modelsWithoutContext = new Set<string>();
 
 async function withSpeechRequest<T>(
-  provider: string, session: string | undefined, request: (signal: RequestInit["signal"]) => Promise<T>,
+  provider: string, session: string | undefined, request: (signal: AbortSignal) => Promise<T>,
   consumerSignal?: AbortSignal,
 ): Promise<T> {
   const controller = new AbortController();
@@ -60,8 +61,7 @@ async function withSpeechRequest<T>(
   const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
   const signal = AbortSignal.any([controller.signal, timeout, ...(consumerSignal ? [consumerSignal] : [])]);
   try {
-    // This runs on Node; React Native also declares a global fetch with a different signal type.
-    return await request(signal as RequestInit["signal"]);
+    return await request(signal);
   } catch (error) {
     if (controller.signal.aborted) throw new Cancelled();
     if (timeout.aborted) throw new Error(`${provider} TTS request timed out`);
@@ -82,7 +82,7 @@ async function synthesizeOpenAi(voice: OpenAiVoice, text: string, session?: stri
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${voice.apiKey}` },
       body: JSON.stringify({ model: voice.model, voice: voice.voice, input: text, response_format: format }),
-      signal,
+      signal: signal as RequestInit["signal"],
     });
     let format: "mp3" | "pcm" = mp3Endpoints.has(voice.endpoint) ? "mp3" : "pcm";
     let response = await request(format);
@@ -137,7 +137,7 @@ export async function requestElevenLabs(
       method: "POST",
       headers: { "Content-Type": "application/json", "xi-api-key": apiKey },
       body: JSON.stringify(context ? { ...body, previous_text: previous, next_text: next } : body),
-      signal,
+      signal: signal as RequestInit["signal"],
     }).catch(() => { throw new Error("Could not reach ElevenLabs for speech"); });
     const withContext = Boolean(previous || next) && !modelsWithoutContext.has(model);
     let response = await request(withContext);
@@ -353,15 +353,25 @@ export function pcmClip(samples: ArrayLike<number>, sampleRate: number): SpeechF
   };
 }
 
-function pcm16Clip(body: ArrayBuffer): SpeechFile {
+function pcm16Clip(body: ArrayBuffer | Uint8Array): SpeechFile {
   if (body.byteLength % 2 !== 0) throw new Error("Speech response contained incomplete PCM audio");
-  const pcm = new DataView(body);
+  const pcm = ArrayBuffer.isView(body)
+    ? new DataView(body.buffer, body.byteOffset, body.byteLength)
+    : new DataView(body);
   const samples = new Float32Array(body.byteLength / 2);
   for (let i = 0; i < samples.length; i++) {
     const sample = pcm.getInt16(i * 2, true);
     samples[i] = sample / (sample < 0 ? 0x8000 : 0x7fff);
   }
   return pcmClip(samples, CLOUD_SAMPLE_RATE);
+}
+
+export async function synthesizeManaged(
+  hub: HubClient, voiceId: string, { text, session }: SpeechRequest,
+): Promise<SpeechFile> {
+  if (isCancelled(session)) throw new Cancelled();
+  return withSpeechRequest("Central voice", session, async (signal) =>
+    pcm16Clip(await hub.synthesize(voiceId, text, signal)));
 }
 
 async function synthesizeLocal(voice: LocalVoice, text: string, session?: string): Promise<SpeechFile> {
@@ -382,9 +392,7 @@ export async function synthesize(input: SpeechRequest, settings?: VoiceSettings)
   const { text, session, localOnly, agentId } = input;
   if (!text.trim()) throw new Error("Nothing to read aloud");
   if (isCancelled(session)) throw new Cancelled();
-  const voice = resolveVoice({ settings, agentId });
-  // Cached client status can be stale when the voice settings change.
-  if (localOnly && voice.provider !== "local") throw new Error("Only local voices can be prefetched");
+  const voice = resolveVoice({ settings, agentId, localOnly });
   switch (voice.provider) {
     case "openai": return synthesizeOpenAi(voice, text, session);
     case "elevenlabs": return pcm16Clip(await requestElevenLabs(voice, { ...input, format: "pcm_24000" }));
@@ -395,17 +403,19 @@ export async function synthesize(input: SpeechRequest, settings?: VoiceSettings)
 const SPEAKING_SETTINGS = "Open Paseo Settings, choose Voice, and find Voice mode > Speaking.";
 
 /** Checks the configured voice and says how to fix any problem; warms a working local voice. */
-export async function checkVoice(settings?: VoiceSettings): Promise<VoiceStatus> {
+export async function checkVoice(settings?: VoiceSettings, { localOnly = false } = {}): Promise<VoiceStatus> {
   let voice: ResolvedVoice;
   try {
-    voice = resolveVoice({ settings });
+    voice = resolveVoice({ settings, localOnly });
   } catch (error) {
     return {
       ok: false,
       voice: "Unknown voice",
       provider: "unknown",
       problem: error instanceof Error ? error.message : "Paseo's voice settings couldn't be read.",
-      steps: [SPEAKING_SETTINGS, "Set Provider to Local or OpenAI and pick a voice from the Model list.", "Tap this warning again to re-check."],
+      steps: [SPEAKING_SETTINGS,
+        localOnly ? "Choose a downloaded Local voice." : "Set Provider to Local or OpenAI and pick a voice from the Model list.",
+        "Tap this warning again to re-check."],
     };
   }
   if (voice.provider === "elevenlabs") {
