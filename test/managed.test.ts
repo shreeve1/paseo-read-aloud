@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmodSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { test } from "node:test";
 import { HubError, loadMode } from "../server/managed";
 import protocol from "../shared/hub-protocol-v1.json" with { type: "json" };
@@ -14,11 +15,20 @@ test("only an absent config selects personal mode; unsafe or broken files leave 
     chmodSync(file, 0o775);
     assert.equal(load().kind, "managed-unavailable", file);
     chmodSync(file, 0o755);
+    const parent = dirname(file);
+    for (const mode of [0o720, 0o702]) {
+      chmodSync(parent, mode);
+      assert.equal(load().kind, "managed-unavailable", parent);
+    }
+    chmodSync(parent, 0o700);
   }
   writeFileSync(files.ca, "not a certificate");
   assert.equal(load().kind, "managed-unavailable");
 
   renameSync(files.config, files.config + ".old");
+  chmodSync(dirname(files.config), 0o770);
+  assert.equal(load().kind, "managed-unavailable");
+  chmodSync(dirname(files.config), 0o700);
   assert.deepEqual(load(), { kind: "personal" });
   symlinkSync("missing.json", files.config);
   assert.equal(load().kind, "managed-unavailable");
@@ -46,8 +56,11 @@ test("a trusted hub receives only the specified routes and the current hosted cr
 
 test("a wrong CA receives neither bearer nor text", async (t) => {
   const target = await mockHub(t, () => assert.fail("Untrusted server received an HTTP request"));
-  const other = await mockHub(t, () => assert.fail("Wrong destination"));
-  writeFileSync(target.files.ca, other.cert);
+  const other = await mockHub(t, (_request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" }).end('{"voices":[]}');
+  }, "localhost", "Second Read Aloud test CA");
+  assert.deepEqual(await other.hub.voices(), { voices: [] });
+  copyFileSync(other.files.ca, target.files.ca);
   const mode = target.load();
   assert.equal(mode.kind, "managed");
   await assert.rejects(mode.hub.synthesize("one", fixtureText), { code: "unreachable" });

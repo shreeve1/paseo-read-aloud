@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
 import { X509Certificate } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { request } from "node:https";
 import { isIP } from "node:net";
+import { dirname } from "node:path";
 import { URL } from "node:url";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -64,6 +65,10 @@ export class HubError extends Error {
 }
 
 function openTrustedFile(path: string, ownerUid: number): number {
+  const parent = lstatSync(dirname(path));
+  if (!parent.isDirectory() || parent.uid !== ownerUid || (parent.mode & 0o022)) {
+    throw new Error("Unsafe managed file directory");
+  }
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = fstatSync(fd);

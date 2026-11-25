@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createServer } from "node:https";
 import { join } from "node:path";
@@ -13,17 +13,19 @@ export async function mockHub(
   t: TestContext,
   reply: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>,
   serverName = "localhost",
+  caName = "Read Aloud test CA",
 ) {
   const dir = mkdtempSync(".managed-test-");
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const files = {
-    config: join(dir, "managed.json"),
-    ca: join(dir, "ca.pem"),
-    helper: join(process.cwd(), dir, "credential"),
+    config: join(dir, "config", "managed.json"),
+    ca: join(dir, "ca", "ca.pem"),
+    helper: join(process.cwd(), dir, "helper", "credential"),
   };
+  for (const parent of ["config", "ca", "helper"]) mkdirSync(join(dir, parent), { mode: 0o700 });
   const openssl = (...args: string[]) => execFileSync("openssl", args, { cwd: dir, stdio: "ignore" });
   openssl("req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-noenc",
-    "-days", "1", "-subj", "/CN=Read Aloud test CA", "-keyout", "ca.key", "-out", "ca.pem");
+    "-days", "1", "-subj", `/CN=${caName}`, "-keyout", "ca.key", "-out", "ca.pem");
   openssl("req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-noenc",
     "-subj", `/CN=${serverName}`, "-keyout", "server.key", "-out", "server.csr");
   writeFileSync(join(dir, "san"), `subjectAltName=DNS:${serverName}\n`);
@@ -45,6 +47,7 @@ export async function mockHub(
   if (!address || typeof address === "string") throw new Error("Mock hub has no TCP address");
   const origin = `https://localhost:${address.port}`;
   writeFileSync(files.config, JSON.stringify({ version: protocol.version, origin }), { mode: 0o644 });
+  copyFileSync(join(dir, "ca.pem"), files.ca);
   chmodSync(files.ca, 0o644);
   function helper(script: string) {
     writeFileSync(files.helper, "#!/bin/sh\n" + script + "\n");
@@ -55,5 +58,5 @@ export async function mockHub(
   const load = () => loadMode(files, ownerUid);
   const mode = load();
   if (mode.kind !== "managed") throw new Error("Could not load the test hub");
-  return { hub: mode.hub, mode, origin, files, requests, helper, load, ownerUid, cert };
+  return { hub: mode.hub, mode, origin, files, requests, helper, load, ownerUid };
 }
