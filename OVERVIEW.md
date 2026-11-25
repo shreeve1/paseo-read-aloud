@@ -63,8 +63,10 @@ speaker button yourself.
 With **ElevenLabs** selected, turn on **Use this voice in Voice mode** to hear
 Paseo Voice mode replies in your main Read Aloud voice. The switch sets
 Paseo's **Speaking** provider to **OpenAI** and points its **Base URL** at
-the speech bridge. The bridge listens only on `127.0.0.1` on the daemon host
-and sends Voice mode speech text to ElevenLabs.
+the speech bridge. Each Linux user gets a port based on their user ID.
+The bridge listens only on the daemon host and accepts requests only when
+they carry your Paseo **Speaking** key. It sends Voice mode speech text
+to ElevenLabs.
 
 Turn the switch off before disabling the plugin. This clears the Base URL
 or restores the Local provider if you were using it before. If you disable
