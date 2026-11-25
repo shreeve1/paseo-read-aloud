@@ -1,9 +1,11 @@
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import { paseoHome } from "./paths";
-import type { startSpeechBridge } from "./speech-bridge";
+import { LEGACY_BRIDGE_KEY, type startSpeechBridge } from "./speech-bridge";
+import { readDaemonConfig, resolveOpenAiTtsKey } from "./voices";
 
 type ConfigAccess = PluginHandlerContext["paseo"]["config"];
 type Config = Awaited<ReturnType<ConfigAccess["get"]>>["config"];
@@ -26,8 +28,8 @@ function readPreviousProvider(file: string) {
 }
 
 export function createVoiceModeControls({
-  bridge, home = paseoHome(),
-}: { bridge: Pick<ReturnType<typeof startSpeechBridge>, "status" | "url">; home?: string }) {
+  bridge, env = process.env, home = paseoHome(env),
+}: { bridge: Pick<ReturnType<typeof startSpeechBridge>, "status" | "url">; env?: NodeJS.ProcessEnv; home?: string }) {
   const dir = path.join(home, "plugin-data", "read-aloud");
   const record = path.join(dir, "voice-mode.json");
   let queue = Promise.resolve();
@@ -40,9 +42,14 @@ export function createVoiceModeControls({
   async function change(config: ConfigAccess, enabled: boolean) {
     const { config: current } = await config.get();
     const bridgeUrl = bridge.url();
-    if (enabled === connected(current, bridgeUrl)) return { ok: true };
+    const wasConnected = connected(current, bridgeUrl);
+    if (!enabled && !wasConnected) return { ok: true };
     const provider = speaking(current)?.provider ?? "local";
     if (enabled) {
+      const key = provider === "openai" ? resolveOpenAiTtsKey(readDaemonConfig(home), env) : undefined;
+      const legacyKey = key === LEGACY_BRIDGE_KEY;
+      const needsKey = !key || legacyKey;
+      if (wasConnected && !needsKey) return { ok: true };
       const { listening, error } = bridge.status();
       if (!listening) return { ok: false, error: error ?? "The Read Aloud speech bridge is not listening." };
       const tts = { provider: "openai", baseUrl: bridgeUrl } as const;
@@ -50,10 +57,10 @@ export function createVoiceModeControls({
         // Keep the restore point even if the daemon persists the patch before its reply is lost.
         fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
         fs.writeFileSync(record, JSON.stringify({ provider }), { mode: 0o600 });
-      } else {
+      } else if (!wasConnected && !legacyKey) {
         fs.rmSync(record, { force: true });
       }
-      const next = provider === "openai" ? tts : { ...tts, apiKey: "read-aloud-bridge" };
+      const next = needsKey ? { ...tts, apiKey: randomBytes(32).toString("base64url") } : tts;
       const patch: Patch = { features: { voiceMode: { tts: next } } };
       const { config: result } = await config.patch(patch);
       return connected(result, bridgeUrl) ? { ok: true }

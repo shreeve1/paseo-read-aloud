@@ -1,10 +1,14 @@
+import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { z } from "zod";
 import type { VoiceSettings } from "../shared/settings";
 import { readKey } from "./elevenlabs-key";
+import { paseoHome } from "./paths";
 import { ElevenLabsSpeechError, requestElevenLabs, type ElevenLabsAudioFormat } from "./tts";
+import { readDaemonConfig, resolveOpenAiTtsKey } from "./voices";
 
 const HOST = "127.0.0.1";
+export const LEGACY_BRIDGE_KEY = "read-aloud-bridge";
 const MAX_BODY_BYTES = 64 * 1024;
 const CONTEXT_MS = 20_000;
 
@@ -36,6 +40,14 @@ function sendError(res: ServerResponse, status: number, message: string) {
   res.end(JSON.stringify({ error: { message, type } }));
 }
 
+function matchesBearer(authorization: string | undefined, key: string) {
+  const token = /^Bearer +(\S+)$/i.exec(authorization ?? "")?.[1];
+  if (!token) return false;
+  const actual = Buffer.from(token);
+  const expected = Buffer.from(key);
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
 async function readBody(req: IncomingMessage, res: ServerResponse) {
   const chunks: Buffer[] = [];
   let bytes = 0;
@@ -62,6 +74,7 @@ export function startSpeechBridge({
   let last: { input: string; time: number } | undefined;
   let error: string | undefined;
   const lifetime = new AbortController();
+  const home = paseoHome(env);
 
   async function speak(req: IncomingMessage, res: ServerResponse) {
     if (req.url?.split("?")[0] !== "/v1/audio/speech") return sendError(res, 404, "Speech endpoint not found.");
@@ -71,6 +84,12 @@ export function startSpeechBridge({
     }
     // A website must not be able to spend the local account's speech quota.
     if (req.headers.origin !== undefined) return sendError(res, 403, "Browser requests are not allowed.");
+
+    const key = resolveOpenAiTtsKey(readDaemonConfig(home), env);
+    if (!key || key === LEGACY_BRIDGE_KEY) {
+      return sendError(res, 401, "No private speech bridge key is configured. Turn the Voice mode switch off and on again.");
+    }
+    if (!matchesBearer(req.headers.authorization, key)) return sendError(res, 401, "Invalid speech bridge bearer token.");
 
     let body: string;
     try {

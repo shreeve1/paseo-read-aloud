@@ -123,9 +123,9 @@ export type DaemonConfig = {
 };
 
 /** The daemon config file. Read directly: server code is trusted, and config.get() masks API keys. */
-export function readDaemonConfig(): DaemonConfig {
+export function readDaemonConfig(home = paseoHome()): DaemonConfig {
   try {
-    return JSON.parse(fs.readFileSync(path.join(paseoHome(), "config.json"), "utf8")) as DaemonConfig;
+    return JSON.parse(fs.readFileSync(path.join(home, "config.json"), "utf8")) as DaemonConfig;
   } catch {
     return {};
   }
@@ -137,6 +137,11 @@ function first(...values: unknown[]): string | undefined {
     if (typeof value === "string" && value.trim()) return value.trim();
   }
   return undefined;
+}
+
+export function resolveOpenAiTtsKey(config: DaemonConfig, env: NodeJS.ProcessEnv) {
+  const tts = config?.features?.voiceMode?.tts;
+  return first(tts?.provider === "openai" ? tts.apiKey : undefined, env.OPENAI_TTS_API_KEY, env.OPENAI_API_KEY);
 }
 
 export function pickAgentVoice({ voiceId, voiceName, agentVoices }: VoiceSettings["elevenlabs"], agentId?: string) {
@@ -170,7 +175,7 @@ export function resolveVoice(
     const baseUrl = first(openai.baseUrl, env.OPENAI_TTS_BASE_URL, env.OPENAI_BASE_URL) ?? "https://api.openai.com/v1";
     return {
       provider: "openai",
-      apiKey: first(openai.apiKey, env.OPENAI_TTS_API_KEY, env.OPENAI_API_KEY),
+      apiKey: resolveOpenAiTtsKey(config, env),
       endpoint: baseUrl.replace(/\/+$/, "") + "/audio/speech",
       model: first(env.TTS_MODEL, openai.model) ?? "tts-1",
       voice: first(env.TTS_VOICE, openai.voice) ?? "alloy",

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
 import { z } from "zod";
@@ -9,7 +11,8 @@ const settings = voiceSettings.schema.parse({
   provider: "elevenlabs",
   elevenlabs: { voiceId: "main/voice", speed: 1.1, agentVoices: [{ id: "other", name: "Other" }] },
 }).elevenlabs;
-const env = { PASEO_HOME: import.meta.dirname, ELEVENLABS_API_KEY: "fake-key" };
+const env = { PASEO_HOME: import.meta.dirname, ELEVENLABS_API_KEY: "fake-key", OPENAI_TTS_API_KEY: "test-tts-key" };
+const authorization = { Authorization: `Bearer ${env.OPENAI_TTS_API_KEY}` };
 const bytes = Uint8Array.of(0, 0, 7, 123, 255, 253);
 const errorBody = z.object({ error: z.object({ message: z.string(), type: z.string() }) });
 
@@ -25,7 +28,7 @@ async function openBridge(t: TestContext, options: Partial<Parameters<typeof sta
   const port = Number(portString);
   assert.ok(port, bridge.status().error ?? "The speech bridge did not bind");
   const speak = (body: object) => fetch(url + "/audio/speech", {
-    method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer ignored" },
+    method: "POST", headers: { "Content-Type": "application/json", ...authorization },
     body: JSON.stringify(body),
   });
   return { base, bridge, port, speak, upstream };
@@ -40,6 +43,72 @@ test("bridge ports use a valid override or derive a port from the Linux user ID"
   assert.equal(bridgePort({}, 0), 20000);
   assert.equal(bridgePort({}, 10124), 20124);
   assert.equal(bridgePort({}), 20000 + ((process.getuid?.() ?? 0) % 10000));
+});
+
+test("the bridge rejects missing and wrong bearer tokens before parsing the body", async (t) => {
+  const { bridge, upstream } = await openBridge(t);
+  for (const headers of [undefined, { Authorization: "Bearer bad--tts-key" }]) {
+    const response = await fetch(bridge.url() + "/audio/speech", {
+      method: "POST", headers, body: "{bad json",
+    });
+    assert.equal(response.status, 401);
+    const { error } = errorBody.parse(await response.json());
+    assert.equal(error.type, "authentication_error");
+    assert.doesNotMatch(error.message, /test-tts-key|bad--tts-key/);
+  }
+  assert.equal(upstream.mock.callCount(), 0);
+});
+
+test("the bridge reads the configured key on each request and falls back to the daemon environment", async (t) => {
+  const home = fs.mkdtempSync(path.join(import.meta.dirname, ".bridge-test-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const testEnv: NodeJS.ProcessEnv = { ...env, PASEO_HOME: home, OPENAI_API_KEY: "test-openai-key" };
+  const { bridge, upstream } = await openBridge(t, { env: testEnv });
+  const configFile = path.join(home, "config.json");
+  const writeKey = (apiKey: string) => fs.writeFileSync(configFile, JSON.stringify({
+    features: { voiceMode: { tts: { provider: "openai", apiKey } } },
+  }), { mode: 0o600 });
+  const speak = async (key: string) => {
+    const response = await fetch(bridge.url() + "/audio/speech", {
+      method: "POST", headers: { Authorization: `Bearer ${key}` }, body: '{"input":"Hello"}',
+    });
+    await response.arrayBuffer();
+    return response.status;
+  };
+  writeKey("configured-key");
+  assert.equal(await speak("configured-key"), 200);
+  assert.equal(await speak(env.OPENAI_TTS_API_KEY), 401);
+  writeKey("rotated-key");
+  assert.equal(await speak("configured-key"), 401);
+  assert.equal(await speak("rotated-key"), 200);
+
+  fs.unlinkSync(configFile);
+  assert.equal(await speak("test-openai-key"), 401);
+  assert.equal(await speak(env.OPENAI_TTS_API_KEY), 200);
+  delete testEnv.OPENAI_TTS_API_KEY;
+  assert.equal(await speak("test-openai-key"), 200);
+  assert.equal(upstream.mock.callCount(), 4);
+});
+
+test("the bridge prompts to reconnect when no private key is configured", async (t) => {
+  const home = fs.mkdtempSync(path.join(import.meta.dirname, ".bridge-test-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const { bridge, upstream } = await openBridge(t, {
+    env: { PASEO_HOME: home, ELEVENLABS_API_KEY: env.ELEVENLABS_API_KEY },
+  });
+  for (const key of [undefined, "read-aloud-bridge"]) {
+    if (key) fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({
+      features: { voiceMode: { tts: { provider: "openai", apiKey: key } } },
+    }), { mode: 0o600 });
+    const response = await fetch(bridge.url() + "/audio/speech", {
+      method: "POST", headers: key ? { Authorization: `Bearer ${key}` } : {}, body: '{"input":"Hello"}',
+    });
+    assert.equal(response.status, 401);
+    const { error } = errorBody.parse(await response.json());
+    assert.equal(error.type, "authentication_error");
+    assert.match(error.message, /turn the Voice mode switch off and on again/i);
+  }
+  assert.equal(upstream.mock.callCount(), 0);
 });
 
 test("the bridge sends the main voice and returns the requested audio bytes unchanged", async (t) => {
@@ -85,11 +154,11 @@ test("invalid routes, methods, JSON, formats and oversized requests do not call 
   const responses = [
     [404, await fetch(base + "/missing", { method: "POST" })],
     [405, await fetch(url)],
-    [400, await fetch(url, { method: "POST", body: "{bad json" })],
+    [400, await fetch(url, { method: "POST", headers: authorization, body: "{bad json" })],
     [400, await speak({ input: "Hello", response_format: "opus" })],
     [400, await speak({ input: " " })],
     [400, await speak({ input: "\u00e9".repeat(32 * 1024) })],
-    [403, await fetch(url, { method: "POST", headers: { Origin: "https://example.test" }, body: '{"input":"hello"}' })],
+    [403, await fetch(url, { method: "POST", headers: { ...authorization, Origin: "https://example.test" }, body: '{"input":"hello"}' })],
   ] as const;
   for (const [status, response] of responses) {
     assert.equal(response.status, status);
