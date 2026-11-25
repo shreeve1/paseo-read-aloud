@@ -3,12 +3,13 @@ import { Server } from "node:net";
 import { dirname } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { createPlayer } from "../client/player";
 import { registerReadAloud } from "../index.server";
 import type { Mode } from "../server/managed";
 import protocol from "../shared/hub-protocol-v1.json" with { type: "json" };
 import { managedStatus, managedVoices } from "../shared/managed";
 import { voiceSettings, type VoiceSettings } from "../shared/settings";
-import { synthesizeSpeech, voiceStatus } from "../shared/speech";
+import { cancelSpeech, synthesizeSpeech, voiceStatus, type SpeechFile } from "../shared/speech";
 import { mockHub } from "./managed-fixture";
 
 const text = protocol.pilot.fixture_text;
@@ -119,9 +120,19 @@ test("approved voices and realistic hub PCM reach the Paseo RPC as playable WAV;
   const fetch = t.mock.method(globalThis, "fetch", async () => assert.fail("Unexpected fetch"));
   assert.deepEqual(await server.call(managedVoices.name), { voices: [{ id: "one", name: "First" }] });
 
-  const speech = synthesizeSpeech.output.parse(await server.call(synthesizeSpeech.name, {
-    text, session: "fixture", previous: "omitted context", next: "also omitted",
-  }));
+  const played: SpeechFile[] = [];
+  const player = createPlayer({
+    async speak(input) {
+      return synthesizeSpeech.output.parse(await server.call(synthesizeSpeech.name, {
+        ...input, previous: "omitted context", next: "also omitted",
+      }));
+    },
+    cancel: (session) => server.call(cancelSpeech.name, { session }),
+    async playAudio(audio) { played.push(audio); },
+  });
+  await player.play("fixture", text, (error) => assert.fail(String(error)), undefined, false);
+  assert.equal(played.length, 1);
+  const [speech] = played;
   assert.equal(speech.mimeType, "audio/wav");
   const wav = Buffer.from(speech.base64, "base64");
   assert.equal(wav.toString("ascii", 0, 4), "RIFF");

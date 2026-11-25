@@ -69,7 +69,9 @@ export function createPlayer(host: PlayerHost, options = PLAYER_DEFAULTS) {
     if (warm.size > 20) warm.delete(warm.keys().next().value as string);
   }
 
-  async function play(key: string, text: string, onError: (error: unknown) => void, agentId?: string, usePrefetch = true) {
+  async function play(
+    key: string, text: string, onError: (error: unknown) => void, agentId?: string, usePrefetch = true, automatic = false,
+  ) {
     if (current) stopRun(current.run);
     const cached = usePrefetch ? warm.get(key) : undefined;
     warm.delete(key);
@@ -82,7 +84,8 @@ export function createPlayer(host: PlayerHost, options = PLAYER_DEFAULTS) {
     const pending: Promise<AudioData>[] = [];
     const request = (index: number) => {
       if (index >= chunks.length || index in pending) return;
-      const speak = () => host.speak(chunkRequest(chunks, index, run.session, agentId));
+      const input = chunkRequest(chunks, index, run.session, agentId);
+      const speak = () => host.speak(automatic ? { ...input, automatic: true } : input);
       pending[index] = index === 0 && cached ? cached.first.then((audio) => audio ?? speak()) : speak();
       pending[index].catch(() => undefined);
     };
@@ -126,7 +129,7 @@ export function createPlayer(host: PlayerHost, options = PLAYER_DEFAULTS) {
     autoPlay(key: string, text: string, createdAt: number | undefined, agentId: string, usePrefetch: boolean) {
       if (current || createdAt === undefined || Math.abs(Date.now() - createdAt) > AUTO_READ_WINDOW_MS || autoPlayed.has(key)) return;
       autoPlayed.add(key);
-      return play(key, text, () => undefined, agentId, usePrefetch);
+      return play(key, text, () => undefined, agentId, usePrefetch, true);
     },
     /** Stops the reply with this key, if it is the one reading. */
     stop(key: string) {
