@@ -1,21 +1,26 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { Server } from "node:net";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { createPlayer } from "../client/player";
 import { registerReadAloud } from "../index.server";
 import type { Mode } from "../server/managed";
+import { bridgePort } from "../server/speech-bridge";
 import protocol from "../shared/hub-protocol-v1.json" with { type: "json" };
 import { managedStatus, managedVoices } from "../shared/managed";
 import { voiceSettings, type VoiceSettings } from "../shared/settings";
 import { cancelSpeech, synthesizeSpeech, voiceStatus, type SpeechFile } from "../shared/speech";
+import { voiceModeStatus } from "../shared/voice-mode";
 import { mockHub } from "./managed-fixture";
 
 const text = protocol.pilot.fixture_text;
 
-function plugin(t: TestContext, mode: Mode, provider: VoiceSettings["provider"]) {
-  const handlers = new Map<string, (input: unknown) => Promise<unknown>>();
+function plugin(t: TestContext, mode: Mode, provider: VoiceSettings["provider"], config: unknown = speakingConfig({ provider: "local" })) {
+  type Handler = (input: unknown, context: { paseo: { config: unknown } }) => Promise<unknown>;
+  const handlers = new Map<string, Handler>();
   let state = { status: "ready", revision: "1", values: voiceSettings.schema.parse({
     provider, managed: { voiceId: "one", voiceName: "First" }, elevenlabs: { voiceId: "old" },
   }) };
@@ -28,7 +33,7 @@ function plugin(t: TestContext, mode: Mode, provider: VoiceSettings["provider"])
         return () => {};
       },
     }),
-    handle: (contract: { name: string }, handler: (input: unknown) => Promise<unknown>) => handlers.set(contract.name, handler),
+    handle: (contract: { name: string }, handler: Handler) => handlers.set(contract.name, handler),
     addHook: () => () => {},
   };
   t.after(registerReadAloud(context as unknown as PluginServerContext, mode));
@@ -38,13 +43,80 @@ function plugin(t: TestContext, mode: Mode, provider: VoiceSettings["provider"])
     async call(name: string, input: object = {}) {
       const handler = handlers.get(name);
       assert.ok(handler, `Missing RPC ${name}`);
-      return handler(input);
+      return handler(name === synthesizeSpeech.name ? synthesizeSpeech.input.parse(input) : input, { paseo: { config } });
     },
     changeProvider(provider: VoiceSettings["provider"]) {
       state = { ...state, values: { ...state.values, provider } };
       listener(state);
     },
   };
+}
+
+test("personal registration starts the bridge and exposes Voice mode and ElevenLabs controls", async (t) => {
+  const listen = Server.prototype.listen;
+  const listening = t.mock.method(Server.prototype, "listen", function (this: Server, options: object) {
+    return Reflect.apply(listen, this, [{ ...options, port: 0 }]);
+  });
+  const config = speakingConfig({ provider: "local" });
+  const server = plugin(t, { kind: "personal" }, "paseo", config);
+  assert.deepEqual([...server.handlers.keys()].sort(), [
+    "elevenlabs.clear-key", "elevenlabs.key-status", "elevenlabs.save-key", "elevenlabs.voices",
+    "managed.status", "speech.cancel", "speech.status", "speech.synthesize", "voice-mode.connect", "voice-mode.status",
+  ]);
+  const bridge = listening.mock.calls[0]?.this;
+  assert.ok(bridge instanceof Server);
+  if (!bridge.listening) await once(bridge, "listening");
+  assert.equal(voiceModeStatus.output.parse(await server.call(voiceModeStatus.name)).listening, true);
+});
+
+type Speaking = { provider: string; baseUrl?: string | null };
+function speakingConfig(initial: Speaking, restore = true) {
+  let tts = initial;
+  return {
+    async get() { return { config: { features: { voiceMode: { tts } } } }; },
+    async patch(patch: { features: { voiceMode: { tts: Speaking } } }) {
+      if (restore) tts = patch.features.voiceMode.tts;
+      return this.get();
+    },
+  };
+}
+
+test("managed status restores a previously bridged Speaking provider without starting a bridge", async (t) => {
+  const { mode, files } = await mockHub(t, () => assert.fail("Unexpected request"));
+  const home = dirname(files.config);
+  overrideEnv(t, "PASEO_HOME", home);
+  const record = join(home, "plugin-data", "read-aloud", "voice-mode.json");
+  mkdirSync(dirname(record), { recursive: true });
+  writeFileSync(record, JSON.stringify({ provider: "local" }));
+  const config = speakingConfig({ provider: "openai", baseUrl: `http://127.0.0.1:${bridgePort()}/v1` });
+  const listening = t.mock.method(Server.prototype, "listen");
+  const server = plugin(t, mode, "managed", config);
+  await Promise.all([server.call(managedStatus.name), server.call(voiceStatus.name)]);
+  assert.deepEqual((await config.get()).config.features.voiceMode.tts, { provider: "local" });
+  assert.equal(existsSync(record), false);
+  assert.equal(listening.mock.callCount(), 0);
+});
+
+test("an unconfirmed Speaking restore is reported in both status responses", async (t) => {
+  const { mode, files } = await mockHub(t, () => assert.fail("Unexpected request"));
+  overrideEnv(t, "PASEO_HOME", dirname(files.config));
+  const config = speakingConfig({ provider: "openai", baseUrl: `http://127.0.0.1:${bridgePort()}/v1` }, false);
+  const server = plugin(t, mode, "managed", config);
+  const voice = voiceStatus.output.parse(await server.call(voiceStatus.name));
+  const managed = managedStatus.output.parse(await server.call(managedStatus.name));
+  assert.notEqual(managed.mode, "personal");
+  assert.ok("speakingProblem" in managed);
+  assert.match(voice.speakingProblem ?? "", /did not restore Speaking/);
+  assert.equal(managed.speakingProblem, voice.speakingProblem);
+});
+
+function overrideEnv(t: TestContext, key: string, value: string) {
+  const previous = process.env[key];
+  process.env[key] = value;
+  t.after(() => {
+    if (previous === undefined) delete process.env[key];
+    else process.env[key] = previous;
+  });
 }
 
 test("the managed handler table exposes neither direct ElevenLabs nor the Voice mode bridge", async (t) => {
@@ -60,11 +132,11 @@ test("the managed handler table exposes neither direct ElevenLabs nor the Voice 
     const status = managedStatus.output.parse(await server.call(managedStatus.name));
     assert.equal(status.mode, hostMode.kind);
     assert.match(voiceStatus.output.parse(await server.call(voiceStatus.name)).problem ?? "", /Direct ElevenLabs/);
-    await assert.rejects(server.call(synthesizeSpeech.name, { text }), /Choose Central voice.*local playback/);
+    await assert.rejects(server.call(synthesizeSpeech.name, { text, manual: true }), /Choose Central voice.*local playback/);
     if (hostMode.kind === "managed-unavailable") {
       await assert.rejects(server.call(managedVoices.name), /Check the host certificate/);
       server.changeProvider("managed");
-      await assert.rejects(server.call(synthesizeSpeech.name, { text }), /Check the host certificate/);
+      await assert.rejects(server.call(synthesizeSpeech.name, { text, manual: true }), /Check the host certificate/);
     }
   }
   assert.equal(listening.mock.callCount(), 0);
@@ -73,26 +145,45 @@ test("the managed handler table exposes neither direct ElevenLabs nor the Voice 
 });
 
 test("managed synthesis is on demand and cannot use Paseo's cloud speaking settings", async (t) => {
-  const { mode, requests, files } = await mockHub(t, () => assert.fail("Unexpected request"));
+  const { mode, requests, files } = await mockHub(t, (_request, response) => {
+    response.writeHead(200, { "Content-Type": "application/octet-stream", "X-Audio-Format": "pcm_s16le_24000_mono" })
+      .end(Buffer.from([0, 0]));
+  });
   const server = plugin(t, mode, "managed");
-  await assert.rejects(server.call(synthesizeSpeech.name, { text, automatic: true }), /Automatic reading is off/);
+  await assert.rejects(server.call(synthesizeSpeech.name, { text }), /Press the speaker button/);
+  await assert.rejects(server.call(synthesizeSpeech.name, { text, manual: true, automatic: true }), /Automatic reading is off/);
   await assert.rejects(server.call(synthesizeSpeech.name, { text, localOnly: true }), /Press the speaker button/);
   server.changeProvider("paseo");
-  const env = process.env;
-  const overrides = { PASEO_HOME: dirname(files.config), PASEO_VOICE_TTS_PROVIDER: "openai" };
-  for (const [name, value] of Object.entries(overrides)) {
-    const previous = env[name];
-    env[name] = value;
-    t.after(() => {
-      if (previous === undefined) delete env[name];
-      else env[name] = previous;
-    });
-  }
+  overrideEnv(t, "PASEO_HOME", dirname(files.config));
+  overrideEnv(t, "PASEO_VOICE_TTS_PROVIDER", "openai");
   const fetch = t.mock.method(globalThis, "fetch", async () => assert.fail("Unexpected fetch"));
   assert.match(voiceStatus.output.parse(await server.call(voiceStatus.name)).problem ?? "", /Speaking to Local/);
-  await assert.rejects(server.call(synthesizeSpeech.name, { text }), /Only local voices/);
+  await assert.rejects(server.call(synthesizeSpeech.name, { text, manual: true }), /Only local voices/);
   assert.equal(fetch.mock.callCount(), 0);
   assert.deepEqual(requests, []);
+});
+
+test("pressing a non-fixture reply sends no HTTP request, even if it includes the fixture line", async (t) => {
+  const { mode, requests } = await mockHub(t, (_request, response) => {
+    response.writeHead(403, { "Content-Type": "application/json" })
+      .end('{"error":{"code":"text_not_allowed","message":"Fixture only"}}');
+  });
+  const server = plugin(t, mode, "managed");
+  const errors: unknown[] = [];
+  const player = createPlayer({
+    async speak(input) {
+      return synthesizeSpeech.output.parse(await server.call(synthesizeSpeech.name, input));
+    },
+    async cancel() {},
+    async playAudio() { assert.fail("Non-fixture audio played"); },
+  });
+  const replies = ["Another synthetic reply.", text + " Extra text follows.", text + "\n?"];
+  for (const [index, reply] of replies.entries()) {
+    await player.play(String(index), reply, (error) => errors.push(error), undefined, false);
+  }
+  assert.deepEqual(requests, []);
+  assert.equal(errors.length, replies.length);
+  for (const error of errors) assert.match(String(error), /The pilot only reads.*blue notebook/);
 });
 
 test("approved voices and realistic hub PCM reach the Paseo RPC as playable WAV; revoked voices fail", async (t) => {
@@ -123,14 +214,12 @@ test("approved voices and realistic hub PCM reach the Paseo RPC as playable WAV;
   const played: SpeechFile[] = [];
   const player = createPlayer({
     async speak(input) {
-      return synthesizeSpeech.output.parse(await server.call(synthesizeSpeech.name, {
-        ...input, previous: "omitted context", next: "also omitted",
-      }));
+      return synthesizeSpeech.output.parse(await server.call(synthesizeSpeech.name, input));
     },
     cancel: (session) => server.call(cancelSpeech.name, { session }),
     async playAudio(audio) { played.push(audio); },
   });
-  await player.play("fixture", text, (error) => assert.fail(String(error)), undefined, false);
+  await player.play("fixture", `**${text}**`, (error) => assert.fail(String(error)), undefined, false);
   assert.equal(played.length, 1);
   const [speech] = played;
   assert.equal(speech.mimeType, "audio/wav");
@@ -149,7 +238,11 @@ test("approved voices and realistic hub PCM reach the Paseo RPC as playable WAV;
   assert.deepEqual(JSON.parse(requests[1].body), { voice_id: "one", text });
 
   allowed = false;
+  await assert.rejects(server.call(synthesizeSpeech.name, { text, manual: true }), /That voice is no longer available.*local playback/);
+  const status = voiceStatus.output.parse(await server.call(voiceStatus.name));
+  assert.equal(status.ok, false);
+  assert.equal(status.unavailableVoiceId, "one");
+  assert.match(status.problem ?? "", /That voice is no longer available/);
   assert.deepEqual(await server.call(managedVoices.name), { voices: [] });
-  await assert.rejects(server.call(synthesizeSpeech.name, { text }), /That voice is no longer available.*local playback/);
   assert.equal(fetch.mock.callCount(), 0);
 });

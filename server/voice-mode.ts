@@ -4,7 +4,7 @@ import path from "node:path";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import { paseoHome } from "./paths";
-import { LEGACY_BRIDGE_KEY, type startSpeechBridge } from "./speech-bridge";
+import { LEGACY_BRIDGE_KEY, speechBridgeUrl, type startSpeechBridge } from "./speech-bridge";
 import { readDaemonConfig, resolveOpenAiTtsKey } from "./voices";
 
 type ConfigAccess = PluginHandlerContext["paseo"]["config"];
@@ -27,11 +27,37 @@ function readPreviousProvider(file: string) {
   }
 }
 
+function restoreRecord(home: string) {
+  return path.join(home, "plugin-data", "read-aloud", "voice-mode.json");
+}
+
+async function restoreSpeaking(config: ConfigAccess, record: string) {
+  const restoreLocal = readPreviousProvider(record) === "local";
+  const patch: Patch = { features: { voiceMode: { tts: restoreLocal ? { provider: "local" } : { baseUrl: null } } } };
+  const { config: result } = await config.patch(patch);
+  const tts = speaking(result);
+  const restored = restoreLocal ? tts?.provider === "local" : tts?.provider === "openai" && tts.baseUrl == null;
+  if (!restored) return { ok: false, error: "Paseo did not restore Speaking settings. Check Paseo's Speaking settings." };
+  fs.rmSync(record, { force: true });
+  return { ok: true };
+}
+
+export async function restoreManagedSpeaking(config: ConfigAccess): Promise<string | undefined> {
+  try {
+    const { config: current } = await config.get();
+    if (connected(current, speechBridgeUrl())) {
+      const result = await restoreSpeaking(config, restoreRecord(paseoHome()));
+      return result.error;
+    }
+  } catch {
+    return "Could not restore Paseo's Speaking settings. Check that Speaking uses Local.";
+  }
+}
+
 export function createVoiceModeControls({
   bridge, env = process.env, home = paseoHome(env),
 }: { bridge: Pick<ReturnType<typeof startSpeechBridge>, "status" | "url">; env?: NodeJS.ProcessEnv; home?: string }) {
-  const dir = path.join(home, "plugin-data", "read-aloud");
-  const record = path.join(dir, "voice-mode.json");
+  const record = restoreRecord(home);
   let queue = Promise.resolve();
 
   async function status(config: ConfigAccess) {
@@ -55,7 +81,7 @@ export function createVoiceModeControls({
       const tts = { provider: "openai", baseUrl: bridgeUrl } as const;
       if (provider !== "openai") {
         // Keep the restore point even if the daemon persists the patch before its reply is lost.
-        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        fs.mkdirSync(path.dirname(record), { recursive: true, mode: 0o700 });
         fs.writeFileSync(record, JSON.stringify({ provider }), { mode: 0o600 });
       } else if (!wasConnected && !legacyKey) {
         fs.rmSync(record, { force: true });
@@ -67,14 +93,7 @@ export function createVoiceModeControls({
         : { ok: false, error: "Paseo did not set the Read Aloud Base URL. Check Paseo's Speaking settings." };
     }
 
-    const restoreLocal = readPreviousProvider(record) === "local";
-    const patch: Patch = { features: { voiceMode: { tts: restoreLocal ? { provider: "local" } : { baseUrl: null } } } };
-    const { config: result } = await config.patch(patch);
-    const tts = speaking(result);
-    const restored = restoreLocal ? tts?.provider === "local" : tts?.provider === "openai" && tts.baseUrl == null;
-    if (!restored) return { ok: false, error: "Paseo did not restore Speaking settings. Check Paseo's Speaking settings." };
-    fs.rmSync(record, { force: true });
-    return { ok: true };
+    return restoreSpeaking(config, record);
   }
 
   function connect(config: ConfigAccess, enabled: boolean) {

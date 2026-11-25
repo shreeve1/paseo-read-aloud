@@ -48,20 +48,26 @@ Paseo plays the audio on the device that starts playback.
 ## Managed hosts
 
 **Central voice** uses a private speech service. Select a voice from the approved
-list in Read Aloud settings. Refreshing the list clears a saved voice that is no
-longer approved. If the service can't play the reply, Read Aloud explains why.
+list in Read Aloud settings. The picker clears a saved voice if the service
+rejects it or a refreshed list no longer includes it. If the service can't play
+the reply, Read Aloud explains why.
 Switch to **Paseo voice settings (local)** to use a downloaded voice instead.
 
 Managed Read Aloud plays only when you press the speaker. For the pilot, use a
-reply that says exactly “The blue notebook is on the shelf.” Managed hosts don't
+reply that says exactly “The blue notebook is on the shelf.” The plugin checks
+the cleaned reply locally before making a speech request. Managed hosts don't
 show **Test voice**, automatic reading, API key controls, or the switch that
 connects Read Aloud to Paseo Voice mode. The pilot keeps Voice mode speaking and
-listening local.
+listening local. On its first status check in managed mode, the plugin looks
+for a leftover Speaking connection to the personal bridge and restores the
+previous setting without opening the bridge. Read Aloud settings shows a
+warning if it can't confirm the restore.
 
 The server selects its mode at startup. Without a managed configuration file it
 uses personal mode. When the file is present, the configuration, CA certificate,
-and helper must be owned by root and writable by neither the group nor other
-users. If the files are invalid or incomplete, Central voice stays unavailable.
+and helper, along with each file's parent directory, must be owned by root
+and writable only by root. If the files are invalid or incomplete, Central
+voice stays unavailable.
 See the [hub protocol](shared/hub-protocol-v1.json) for paths and formats.
 
 ## Personal setup

@@ -11,8 +11,8 @@ import { DIRECT_VOICE_UNAVAILABLE, managedVoices, type ManagedStatus } from "../
 import { deviceSettings, voiceSettings, type VoiceSettings } from "../shared/settings";
 import { synthesizeSpeech } from "../shared/speech";
 import { voiceModeConnect, voiceModeStatus } from "../shared/voice-mode";
-import { reconcileManagedVoice, voiceSources } from "./managed-settings";
-import { useManagedStatus, voiceStatusQueryKey } from "./voice-status";
+import { canTestVoice, reconcileManagedVoice, voiceSources } from "./managed-settings";
+import { useManagedStatus, useVoiceStatus, voiceStatusQueryKey } from "./voice-status";
 
 const MODELS = [
   { value: "eleven_flash_v2_5", label: "Flash v2.5 (fast, low cost)" },
@@ -245,16 +245,20 @@ function ManagedVoicePicker({ hostId, settings, theme }: {
     refetchOnMount: "always",
     retry: false,
   });
-  const available = voices.isSuccess && voices.isFetchedAfterMount ? voices.data.voices : undefined;
+  const { data: speech } = useVoiceStatus(hostId);
+  const unavailableVoiceId = speech?.unavailableVoiceId;
+  const available = voices.isSuccess && voices.isFetchedAfterMount
+    ? voices.data.voices.filter(({ id }) => id !== unavailableVoiceId)
+    : undefined;
   const saved = settings.values.managed;
-  const selection = reconcileManagedVoice(saved, available);
+  const selection = reconcileManagedVoice(saved, available, unavailableVoiceId);
 
   useEffect(() => {
-    if (!voices.isFetching && selection !== saved &&
+    if (selection !== saved && (!voices.isFetching || saved.voiceId === unavailableVoiceId) &&
         !settings.saving && !settings.saveError) {
       void settings.save({ ...settings.values, managed: selection }, settings.revision);
     }
-  }, [saved, selection, settings, voices.isFetching]);
+  }, [saved, selection, settings, unavailableVoiceId, voices.isFetching]);
 
   return (
     <SettingsCard>
@@ -312,10 +316,10 @@ export function createVoiceSettingsScreen(client: PluginClientContext) {
       }
     }
 
-    const testAction = (
+    const testAction = canTestVoice(status?.mode) ? (
       <SettingsAction label="Test voice" actionLabel={testing ? "Testing..." : "Play"}
         disabled={testing || settings.saving} error={testError || undefined} onPress={() => void testVoice()} />
-    );
+    ) : null;
     const personal = status?.mode === "personal";
     const provider = settings.status === "ready" ? settings.values.provider : undefined;
     const options = status ? voiceSources(status.mode) : [];
@@ -360,11 +364,14 @@ export function createVoiceSettingsScreen(client: PluginClientContext) {
               disabled={settings.saving} onPress={() => void settings.reload()} />
           ) : null}
         </SettingsSection>
+        {status && status.mode !== "personal" && status.speakingProblem ? (
+          <Message theme={theme} text={status.speakingProblem} error />
+        ) : null}
         {elevenLabs ? <ElevenLabsControls settings={settings} theme={theme} testAction={testAction} /> : null}
         {status && status.mode !== "personal" && settings.status === "ready" && provider === "managed" ? (
           <ManagedVoiceControls status={status} hostId={host.id} settings={settings} theme={theme} />
         ) : null}
-        {personal && settings.status === "ready" && provider === "paseo" ? (
+        {testAction && settings.status === "ready" && provider === "paseo" ? (
           <SettingsSection title="Preview">
             <SettingsCard>{testAction}</SettingsCard>
           </SettingsSection>

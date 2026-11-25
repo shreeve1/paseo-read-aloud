@@ -1,15 +1,16 @@
-import type { PluginServerContext } from "@getpaseo/plugin/server";
+import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin/server";
 import { elevenLabsClearKey, elevenLabsKeyStatus, elevenLabsSaveKey, elevenLabsVoices } from "./shared/elevenlabs";
-import { DIRECT_VOICE_UNAVAILABLE, managedStatus, managedVoices } from "./shared/managed";
+import { DIRECT_VOICE_UNAVAILABLE, managedStatus, managedVoices, type ManagedStatus } from "./shared/managed";
 import { voiceSettings, type VoiceSettings } from "./shared/settings";
 import { cancelSpeech, synthesizeSpeech, voiceStatus, type SpeechFile, type SpeechRequest, type VoiceStatus } from "./shared/speech";
+import protocol from "./shared/hub-protocol-v1.json" with { type: "json" };
 import { voiceModeConnect, voiceModeStatus } from "./shared/voice-mode";
-import { loadMode, withLocalOption, type Mode } from "./server/managed";
+import { HubError, loadMode, withLocalOption, type Mode } from "./server/managed";
 import { addReadAloudRow } from "./server/reply-row";
 import { startSpeechBridge } from "./server/speech-bridge";
 import { cancel, checkVoice, disposeEngine, synthesize, synthesizeManaged } from "./server/tts";
 import { keyStatus, listVoices, removeKey, validateAndSaveKey } from "./server/elevenlabs";
-import { createVoiceModeControls } from "./server/voice-mode";
+import { createVoiceModeControls, restoreManagedSpeaking } from "./server/voice-mode";
 
 type SpeechHandlers = {
   status(settings?: VoiceSettings): Promise<VoiceStatus>;
@@ -50,6 +51,8 @@ function registerPersonal(
 }
 
 function registerManaged(server: PluginServerContext, mode: Exclude<Mode, { kind: "personal" }>): SpeechHandlers {
+  // Tie denials to the saved selection, so a late response cannot invalidate a newer choice.
+  const rejected = new WeakSet<VoiceSettings["managed"]>();
   server.handle(managedVoices, async () => {
     if (mode.kind === "managed-unavailable") throw new Error(mode.reason);
     return mode.hub.voices();
@@ -60,15 +63,29 @@ function registerManaged(server: PluginServerContext, mode: Exclude<Mode, { kind
       if (settings?.provider !== "managed") return checkVoice(undefined, { localOnly: true });
       if (mode.kind === "managed-unavailable") return centralStatus(mode.reason);
       if (!settings.managed.voiceId) return centralStatus(CHOOSE_CENTRAL_VOICE);
-      return centralStatus(undefined, settings.managed.voiceName || "Central voice");
+      const { voiceId, voiceName } = settings.managed;
+      if (rejected.has(settings.managed)) {
+        return { ...centralStatus(new HubError("voice_not_allowed").message, voiceName || "Central voice"), unavailableVoiceId: voiceId };
+      }
+      return centralStatus(undefined, voiceName || "Central voice");
     },
     async synthesize(input, settings) {
-      if (input.automatic || input.localOnly) throw new Error(MANUAL_PLAYBACK_ONLY);
+      if (input.manual !== true || input.automatic || input.localOnly) throw new Error(MANUAL_PLAYBACK_ONLY);
       if (settings?.provider === "elevenlabs") throw new Error(withLocalOption(DIRECT_VOICE_UNAVAILABLE));
       if (settings?.provider !== "managed") return synthesize({ ...input, localOnly: true });
       if (mode.kind === "managed-unavailable") throw new Error(mode.reason);
       if (!settings.managed.voiceId) throw new Error(CHOOSE_CENTRAL_VOICE);
-      return synthesizeManaged(mode.hub, settings.managed.voiceId, input);
+      if (protocol.pilot.fixture_only &&
+          (input.text !== protocol.pilot.fixture_text || input.partial || input.previous || input.next)) {
+        throw new HubError("text_not_allowed");
+      }
+      if (rejected.has(settings.managed)) throw new HubError("voice_not_allowed");
+      try {
+        return await synthesizeManaged(mode.hub, settings.managed.voiceId, input);
+      } catch (error) {
+        if (error instanceof HubError && error.code === "voice_not_allowed") rejected.add(settings.managed);
+        throw error;
+      }
     },
   };
 }
@@ -88,12 +105,28 @@ export function registerReadAloud(server: PluginServerContext, mode: Mode) {
   };
   const handlers = mode.kind === "personal" ? registerPersonal(server, getSettings) : registerManaged(server, mode);
 
-  server.handle(managedStatus, () => mode.kind === "managed-unavailable"
-    ? { mode: mode.kind, reason: mode.reason }
-    : { mode: mode.kind });
+  let speakingRestore: Promise<string | undefined> | undefined;
+  function checkSpeaking({ paseo }: PluginHandlerContext) {
+    return speakingRestore ??= restoreManagedSpeaking(paseo.config).then((problem) => {
+      if (problem) speakingRestore = undefined;
+      return problem;
+    });
+  }
+
+  server.handle(managedStatus, async (_input, context): Promise<ManagedStatus> => {
+    if (mode.kind === "personal") return { mode: mode.kind };
+    const speakingProblem = await checkSpeaking(context);
+    return mode.kind === "managed-unavailable"
+      ? { mode: mode.kind, reason: mode.reason, speakingProblem }
+      : { mode: mode.kind, speakingProblem };
+  });
   server.handle(synthesizeSpeech, async (input) => handlers.synthesize(input, await getSettings()));
   server.handle(cancelSpeech, cancel);
-  server.handle(voiceStatus, async () => handlers.status(await getSettings()));
+  server.handle(voiceStatus, async (_input, context) => {
+    const speakingProblem = mode.kind === "personal" ? undefined : await checkSpeaking(context);
+    const status = await handlers.status(await getSettings());
+    return speakingProblem ? { ...status, speakingProblem } : status;
+  });
   const removeHook = server.addHook("agent.turn.after", addReadAloudRow);
   return async () => {
     await handlers.close?.();

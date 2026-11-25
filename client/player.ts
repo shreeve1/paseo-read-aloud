@@ -70,7 +70,8 @@ export function createPlayer(host: PlayerHost, options = PLAYER_DEFAULTS) {
   }
 
   async function play(
-    key: string, text: string, onError: (error: unknown) => void, agentId?: string, usePrefetch = true, automatic = false,
+    key: string, text: string, onError: (error: unknown) => void, agentId: string | undefined,
+    usePrefetch: boolean, intent: { manual: true } | { automatic: true },
   ) {
     if (current) stopRun(current.run);
     const cached = usePrefetch ? warm.get(key) : undefined;
@@ -80,12 +81,15 @@ export function createPlayer(host: PlayerHost, options = PLAYER_DEFAULTS) {
     current = { run, phase: "loading" };
     setPhase(run, "loading");
 
-    const chunks = toChunks(toSpeech(text));
+    const cleaned = toSpeech(text);
+    const chunks = toChunks(cleaned);
     const pending: Promise<AudioData>[] = [];
     const request = (index: number) => {
       if (index >= chunks.length || index in pending) return;
       const input = chunkRequest(chunks, index, run.session, agentId);
-      const speak = () => host.speak(automatic ? { ...input, automatic: true } : input);
+      const speak = () => host.speak({
+        ...input, ...intent, ...(input.text === cleaned ? {} : { partial: true }),
+      });
       pending[index] = index === 0 && cached ? cached.first.then((audio) => audio ?? speak()) : speak();
       pending[index].catch(() => undefined);
     };
@@ -124,12 +128,14 @@ export function createPlayer(host: PlayerHost, options = PLAYER_DEFAULTS) {
   }
 
   return {
-    play,
+    play(key: string, text: string, onError: (error: unknown) => void, agentId?: string, usePrefetch = true) {
+      return play(key, text, onError, agentId, usePrefetch, { manual: true });
+    },
     prefetch,
     autoPlay(key: string, text: string, createdAt: number | undefined, agentId: string, usePrefetch: boolean) {
       if (current || createdAt === undefined || Math.abs(Date.now() - createdAt) > AUTO_READ_WINDOW_MS || autoPlayed.has(key)) return;
       autoPlayed.add(key);
-      return play(key, text, () => undefined, agentId, usePrefetch, true);
+      return play(key, text, () => undefined, agentId, usePrefetch, { automatic: true });
     },
     /** Stops the reply with this key, if it is the one reading. */
     stop(key: string) {

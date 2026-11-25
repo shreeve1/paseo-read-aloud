@@ -62,6 +62,10 @@ async function readBody(req: IncomingMessage, res: ServerResponse) {
   return Buffer.concat(chunks, bytes).toString("utf8");
 }
 
+export function speechBridgeUrl(port = bridgePort()) {
+  return `http://${HOST}:${port}/v1`;
+}
+
 export function startSpeechBridge({
   getSettings, env = process.env, port = bridgePort(env), fetchSpeech, now = Date.now,
 }: {
@@ -143,7 +147,7 @@ export function startSpeechBridge({
     url: () => {
       const address = server.address();
       const boundPort = address && typeof address === "object" ? address.port : port;
-      return `http://${HOST}:${boundPort}/v1`;
+      return speechBridgeUrl(boundPort);
     },
     close: () => new Promise<void>((resolve) => {
       lifetime.abort();

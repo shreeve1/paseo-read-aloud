@@ -35,13 +35,16 @@ providers receive reply text.
 ## Central voice on a managed host
 
 Open **Settings > Plugins > Read Aloud**. Select **Central voice** and choose an approved voice.
-You don't need an ElevenLabs key. **Refresh** checks the current list and clears your selection
-if the voice was removed. If Central voice can't play, select **Paseo voice settings (local)**
-and use a downloaded voice from **Settings > Voice**.
+You don't need an ElevenLabs key. If the service rejects your selected voice or **Refresh** finds
+that it was removed, the picker clears it. If Central voice can't play, select **Paseo voice
+settings (local)** and use a downloaded voice from **Settings > Voice**.
 
 Managed Read Aloud plays on demand. During the pilot, press the speaker under a reply that
-says “The blue notebook is on the shelf.” Automatic reading and **Test voice** are unavailable.
-Paseo's separate Voice mode uses its own local speaking and listening settings in the pilot.
+says only “The blue notebook is on the shelf.” The plugin keeps other replies on your host.
+Automatic reading and **Test voice** are unavailable. Paseo's separate Voice mode uses its own
+local speaking and listening settings in the pilot. When Read Aloud first checks its status, it
+disconnects any Speaking setting that still points to the old Read Aloud bridge. If it can't
+restore the previous setting, Read Aloud settings shows a warning.
 
 Your administrator sets up the private service. See the [hub protocol](shared/hub-protocol-v1.json)
 for the required host files and credential helper.

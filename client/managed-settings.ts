@@ -14,13 +14,19 @@ export function voiceSources(mode: ManagedStatus["mode"]) {
   return mode === "personal" ? personalSources : managedSources;
 }
 
+export function canTestVoice(mode: ManagedStatus["mode"] | undefined): boolean {
+  return mode === "personal";
+}
+
 export function shouldAutoRead(mode: ManagedStatus["mode"] | undefined, enabled: boolean): boolean {
   return mode === "personal" && enabled;
 }
 
 export function reconcileManagedVoice(
   saved: VoiceSettings["managed"], available: readonly { id: string; name: string }[] | undefined,
+  unavailableVoiceId?: string,
 ): VoiceSettings["managed"] {
+  if (saved.voiceId && saved.voiceId === unavailableVoiceId) return { voiceId: "", voiceName: "" };
   if (available === undefined) return saved;
   const voice = available.find(({ id }) => id === saved.voiceId);
   const voiceId = voice?.id ?? "";

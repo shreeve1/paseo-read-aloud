@@ -139,7 +139,7 @@ test("each chunk gets its neighbors and prefetch matches the first press request
     text, agentId: "agent", previous: chunks[index - 1], next: chunks[index + 1],
   }));
   const payloads = () => requests.splice(0).map((request) => {
-    const { session, localOnly, ...payload } = request;
+    const { session, localOnly, manual, partial, ...payload } = request;
     assert.ok(session);
     return payload;
   });

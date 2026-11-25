@@ -6,8 +6,8 @@ export const managedStatus = defineRpc({
   input: z.object({}),
   output: z.discriminatedUnion("mode", [
     z.object({ mode: z.literal("personal") }),
-    z.object({ mode: z.literal("managed") }),
-    z.object({ mode: z.literal("managed-unavailable"), reason: z.string() }),
+    z.object({ mode: z.literal("managed"), speakingProblem: z.string().optional() }),
+    z.object({ mode: z.literal("managed-unavailable"), reason: z.string(), speakingProblem: z.string().optional() }),
   ]),
 });
 export type ManagedStatus = z.output<typeof managedStatus.output>;
