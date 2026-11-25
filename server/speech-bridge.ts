@@ -5,10 +5,17 @@ import { readKey } from "./elevenlabs-key";
 import { ElevenLabsSpeechError, requestElevenLabs, type ElevenLabsAudioFormat } from "./tts";
 
 const HOST = "127.0.0.1";
-export const BRIDGE_PORT = 8390;
-export const BRIDGE_URL = `http://${HOST}:${BRIDGE_PORT}/v1`;
 const MAX_BODY_BYTES = 64 * 1024;
 const CONTEXT_MS = 20_000;
+
+export function bridgePort(env = process.env, uid = process.getuid?.() ?? 0) {
+  const override = env.READ_ALOUD_BRIDGE_PORT?.trim();
+  if (override && /^\d+$/.test(override)) {
+    const port = Number(override);
+    if (port >= 1024 && port <= 65535) return port;
+  }
+  return 20000 + (uid % 10000);
+}
 
 const speechInput = z.object({
   input: z.string().refine((text) => Boolean(text.trim())),
@@ -44,7 +51,7 @@ async function readBody(req: IncomingMessage, res: ServerResponse) {
 }
 
 export function startSpeechBridge({
-  getSettings, port = BRIDGE_PORT, fetchSpeech, env, now = Date.now,
+  getSettings, env = process.env, port = bridgePort(env), fetchSpeech, now = Date.now,
 }: {
   getSettings: () => Promise<VoiceSettings["elevenlabs"] | undefined>;
   port?: number;
@@ -114,9 +121,10 @@ export function startSpeechBridge({
 
   return {
     status: () => ({ listening: server.listening, error }),
-    port: () => {
+    url: () => {
       const address = server.address();
-      return typeof address === "object" ? address?.port : undefined;
+      const boundPort = address && typeof address === "object" ? address.port : port;
+      return `http://${HOST}:${boundPort}/v1`;
     },
     close: () => new Promise<void>((resolve) => {
       lifetime.abort();

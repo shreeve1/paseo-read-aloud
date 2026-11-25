@@ -22,7 +22,7 @@ export default function contribute(server: PluginServerContext) {
     await initial;
     return latest?.elevenlabs;
   } });
-  const voiceMode = createVoiceModeControls({ bridgeStatus: bridge.status });
+  const voiceMode = createVoiceModeControls({ bridge });
   server.handle(voiceModeStatus, (_input, { paseo }) => voiceMode.status(paseo.config));
   server.handle(voiceModeConnect, ({ enabled }, { paseo }) => voiceMode.connect(paseo.config, enabled));
   server.handle(synthesizeSpeech, async (input) => {

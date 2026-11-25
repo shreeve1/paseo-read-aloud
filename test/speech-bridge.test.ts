@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { setTimeout } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
 import { z } from "zod";
-import { startSpeechBridge } from "../server/speech-bridge.ts";
+import { bridgePort, startSpeechBridge } from "../server/speech-bridge.ts";
 import { voiceSettings } from "../shared/settings.ts";
 
 const settings = voiceSettings.schema.parse({
@@ -20,15 +20,27 @@ async function openBridge(t: TestContext, options: Partial<Parameters<typeof sta
   });
   t.after(() => bridge.close());
   for (let tries = 0; !bridge.status().listening && tries < 100; tries++) await setTimeout(5);
-  const port = bridge.port();
+  const url = bridge.url();
+  const { origin: base, port: portString } = new URL(url);
+  const port = Number(portString);
   assert.ok(port, bridge.status().error ?? "The speech bridge did not bind");
-  const base = `http://127.0.0.1:${port}`;
-  const speak = (body: object) => fetch(base + "/v1/audio/speech", {
+  const speak = (body: object) => fetch(url + "/audio/speech", {
     method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer ignored" },
     body: JSON.stringify(body),
   });
   return { base, bridge, port, speak, upstream };
 }
+
+test("bridge ports use a valid override or derive a port from the Linux user ID", () => {
+  assert.equal(bridgePort({ READ_ALOUD_BRIDGE_PORT: "1024" }, 123), 1024);
+  assert.equal(bridgePort({ READ_ALOUD_BRIDGE_PORT: "65535" }, 123), 65535);
+  for (const invalid of ["", "0", "1023", "65536", "25000.5", "2e4", "bad"]) {
+    assert.equal(bridgePort({ READ_ALOUD_BRIDGE_PORT: invalid }, 123), 20123);
+  }
+  assert.equal(bridgePort({}, 0), 20000);
+  assert.equal(bridgePort({}, 10124), 20124);
+  assert.equal(bridgePort({}), 20000 + ((process.getuid?.() ?? 0) % 10000));
+});
 
 test("the bridge sends the main voice and returns the requested audio bytes unchanged", async (t) => {
   const { speak, upstream } = await openBridge(t);

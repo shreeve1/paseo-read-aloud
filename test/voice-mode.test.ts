@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
-import { BRIDGE_URL } from "../server/speech-bridge.ts";
 import { createVoiceModeControls } from "../server/voice-mode.ts";
 
 type ConfigAccess = Parameters<ReturnType<typeof createVoiceModeControls>["status"]>[0];
@@ -13,7 +12,10 @@ type Tts = VoiceMode["tts"];
 
 const local = { provider: "local" } as const;
 const openai = { provider: "openai", hasApiKey: true, model: "tts-1-hd", voice: "onyx" } as const;
-const bridged = { ...openai, baseUrl: BRIDGE_URL };
+const bridgeUrl = "http://127.0.0.1:23571/v1";
+const bridged = { ...openai, baseUrl: bridgeUrl };
+const bridge = { status: () => ({ listening: true, error: undefined }), url: () => bridgeUrl };
+const stoppedBridge = { ...bridge, status: () => ({ listening: false, error: "Port in use" }) };
 
 function fakeConfig(initial: Tts, ...results: Tts[]) {
   const patches: Patch[] = [];
@@ -51,7 +53,7 @@ function setup(t: TestContext) {
   const home = fs.mkdtempSync(path.join(import.meta.dirname, ".voice-mode-test-"));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const record = path.join(home, "plugin-data", "read-aloud", "voice-mode.json");
-  const controls = createVoiceModeControls({ bridgeStatus: () => ({ listening: true, error: undefined }), home });
+  const controls = createVoiceModeControls({ bridge, home });
   return { controls, home, record };
 }
 
@@ -65,7 +67,7 @@ test("connecting an OpenAI setup patches only the Base URL and disabling clears 
   assert.deepEqual(await controls.connect(config, false), { ok: true });
   assert.equal((await controls.status(config)).connected, false);
   assert.deepEqual(patches, [
-    { features: { voiceMode: { tts: { provider: "openai", baseUrl: BRIDGE_URL } } } },
+    { features: { voiceMode: { tts: { provider: "openai", baseUrl: bridgeUrl } } } },
     { features: { voiceMode: { tts: { baseUrl: null } } } },
   ]);
 });
@@ -76,14 +78,12 @@ test("connecting Local saves the provider and disabling restores it even after a
   assert.equal((await controls.status(config)).provider, "local");
   assert.deepEqual(await controls.connect(config, true), { ok: true });
   assert.deepEqual(JSON.parse(fs.readFileSync(record, "utf8")), { provider: "local" });
-  const restarted = createVoiceModeControls({
-    bridgeStatus: () => ({ listening: false, error: "Port in use" }), home,
-  });
+  const restarted = createVoiceModeControls({ bridge: stoppedBridge, home });
   assert.deepEqual(await restarted.status(config), { listening: false, error: "Port in use", connected: true, provider: "openai" });
   assert.deepEqual(await restarted.connect(config, false), { ok: true });
   assert.equal(fs.existsSync(record), false);
   assert.deepEqual(patches, [
-    { features: { voiceMode: { tts: { provider: "openai", baseUrl: BRIDGE_URL, apiKey: "read-aloud-bridge" } } } },
+    { features: { voiceMode: { tts: { provider: "openai", baseUrl: bridgeUrl, apiKey: "read-aloud-bridge" } } } },
     { features: { voiceMode: { tts: { provider: "local" } } } },
   ]);
 });
@@ -102,7 +102,7 @@ test("connection and restoration must be confirmed by the daemon's patch result"
 test("the switch cannot connect a stopped bridge or clear an unrelated Base URL", async (t) => {
   const { home, record } = setup(t);
   const { config, patches } = fakeConfig({ ...openai, baseUrl: "https://example.test/v1" });
-  const stopped = createVoiceModeControls({ bridgeStatus: () => ({ listening: false, error: "Port in use" }), home });
+  const stopped = createVoiceModeControls({ bridge: stoppedBridge, home });
   assert.deepEqual(await stopped.connect(config, true), { ok: false, error: "Port in use" });
   assert.deepEqual(await stopped.connect(config, false), { ok: true });
   assert.deepEqual(patches, []);
