@@ -32,6 +32,18 @@ Read Aloud saves the ElevenLabs key on the daemon host in
 `<paseo-home>/plugin-data/read-aloud/elevenlabs-key`. See [the overview](OVERVIEW.md#data) for which
 providers receive reply text.
 
+## Voice mode
+
+With **ElevenLabs** selected, turn on **Use this voice in Voice mode** to hear Paseo Voice mode
+replies in your main Read Aloud voice. The switch changes Paseo's **Speaking** provider to
+**OpenAI** and sets its **Base URL** to `http://127.0.0.1:8390/v1`. The bridge listens only on
+`127.0.0.1` on the daemon host and sends speech requests to ElevenLabs. Listening settings stay
+the same.
+
+Turn the switch off before disabling Read Aloud. It clears the Base URL if you started with
+OpenAI, or restores the Local provider if you started with Local. If you disable the plugin first,
+Voice mode cannot speak until you re-enable it or change the **Speaking** settings in Paseo.
+
 ## Layout
 
 | Path | What it does |

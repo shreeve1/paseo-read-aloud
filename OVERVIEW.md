@@ -58,6 +58,19 @@ of completion, provided no reply is already playing. A browser can block
 automatic playback until you interact with the page. You can still press the
 speaker button yourself.
 
+## Voice mode
+
+With **ElevenLabs** selected, turn on **Use this voice in Voice mode** to hear
+Paseo Voice mode replies in your main Read Aloud voice. The switch sets
+Paseo's **Speaking** provider to **OpenAI** and points its **Base URL** at
+the speech bridge. The bridge listens only on `127.0.0.1` on the daemon host
+and sends Voice mode speech text to ElevenLabs.
+
+Turn the switch off before disabling the plugin. This clears the Base URL
+or restores the Local provider if you were using it before. If you disable
+the plugin first, Voice mode cannot speak until you re-enable the plugin or
+change Paseo's **Speaking** settings.
+
 ## Data
 
 Local speech generates audio on the daemon host and sends the finished audio to
