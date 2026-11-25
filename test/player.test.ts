@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createPlayer, type AudioData } from "../client/player.ts";
+import { createPlayer, type AudioData, type PlayerHost } from "../client/player.ts";
 import { toChunks, toSpeech } from "../shared/text.ts";
 
 const CLIP_MS = 80;
@@ -22,7 +22,7 @@ function fakeHost({ synthMs = 5, fail = false } = {}) {
     cancelled,
     now,
     host: {
-      async speak(text: string, session: string): Promise<AudioData> {
+      async speak({ text, session }: Parameters<PlayerHost["speak"]>[0]): Promise<AudioData> {
         await wait(synthMs);
         if (fail) throw new Error("voice broke");
         if (cancelled.includes(session)) throw new Error("cancelled");
@@ -116,11 +116,40 @@ test("starting another reply stops the first", async () => {
 test("a prefetched first chunk is reused, not generated twice", async () => {
   const fake = fakeHost();
   let calls = 0;
-  const player = createPlayer({ ...fake.host, speak: (text, session) => (calls++, fake.host.speak(text, session)) }, options);
+  const player = createPlayer({ ...fake.host, speak: (input) => (calls++, fake.host.speak(input)) }, options);
   player.prefetch("row", reply("A"));
   await wait(20);
   await player.play("row", reply("A"), noError);
   assert.equal(calls, CHUNKS);
+});
+
+test("each chunk gets its neighbors and prefetch matches the first press request", async () => {
+  const text = reply("A");
+  const chunks = toChunks(toSpeech(text));
+  const requests: Parameters<PlayerHost["speak"]>[0][] = [];
+  const player = createPlayer({
+    async speak(input) {
+      requests.push(input);
+      return { base64: "", mimeType: "audio/wav" };
+    },
+    async cancel() {},
+    async playAudio() {},
+  });
+  const expected = chunks.map((text, index) => ({
+    text, agentId: "agent", previous: chunks[index - 1], next: chunks[index + 1],
+  }));
+  const payloads = () => requests.splice(0).map((request) => {
+    const { session, localOnly, ...payload } = request;
+    assert.ok(session);
+    return payload;
+  });
+
+  await player.play("row", text, noError, "agent");
+  assert.deepEqual(payloads(), expected);
+  player.prefetch("row", text, "agent");
+  assert.equal(requests[0].localOnly, true);
+  await player.play("row", text, noError, "agent");
+  assert.deepEqual(payloads(), expected);
 });
 
 test("a synthesis error is reported and the button resets", async () => {

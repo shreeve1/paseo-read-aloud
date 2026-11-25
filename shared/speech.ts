@@ -4,15 +4,24 @@ import { z } from "zod";
 export { MAX_SPOKEN_CHARS, toChunks, toSpeech } from "./text";
 
 /**
- * Renders one chunk of speakable text to an audio file with Paseo's configured voice.
+ * Renders one chunk of speakable text to an audio file with the configured voice.
  * `session` groups the chunks of one press so a stop can drop the ones still waiting.
- * `durationMs` is set when the length is known exactly (local voices), for gapless playback.
+ * `durationMs` is set for WAV clips so the player can queue the next clip in time.
  */
 export const synthesizeSpeech = defineRpc({
   name: "speech.synthesize",
-  input: z.object({ text: z.string().min(1).max(2000), session: z.string().max(100).optional() }),
+  input: z.object({
+    text: z.string().min(1).max(2000),
+    session: z.string().max(100).optional(),
+    agentId: z.string().optional(),
+    previous: z.string().max(1000).optional(),
+    next: z.string().max(1000).optional(),
+    localOnly: z.boolean().optional(),
+  }),
   output: z.object({ base64: z.string(), mimeType: z.string(), durationMs: z.number().optional() }),
 });
+export type SpeechRequest = z.output<typeof synthesizeSpeech.input>;
+export type SpeechFile = z.output<typeof synthesizeSpeech.output>;
 
 /** Drops a session's queued chunks and aborts its in-flight network requests. */
 export const cancelSpeech = defineRpc({

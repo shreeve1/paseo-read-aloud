@@ -3,9 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
+import type { SpeechFile, SpeechRequest } from "../shared/speech";
 import { readDaemonConfig, requiredFiles, resolveVoice, type ResolvedVoice, type TtsEngine } from "./voices";
 
-type SpeechFile = { base64: string; mimeType: string; durationMs?: number };
 type LocalVoice = Extract<ResolvedVoice, { provider: "local" }>;
 type OpenAiVoice = Extract<ResolvedVoice, { provider: "openai" }>;
 
@@ -36,14 +36,15 @@ export async function cancel({ session }: { session: string }): Promise<{ ok: bo
   return { ok: true };
 }
 
-// ---------- OpenAI ----------
+// ---------- Cloud voices ----------
 
-const OPENAI_TIMEOUT_MS = 60_000;
+const REQUEST_TIMEOUT_MS = 60_000;
+const CLOUD_SAMPLE_RATE = 24_000;
+const mp3Endpoints = new Set<string>();
 
-async function synthesizeOpenAi(voice: OpenAiVoice, text: string, session?: string): Promise<SpeechFile> {
-  if (!voice.apiKey) {
-    throw new Error("OpenAI TTS is selected in Paseo's voice settings but no API key is configured");
-  }
+async function withSpeechRequest(
+  provider: string, session: string | undefined, request: (signal: RequestInit["signal"]) => Promise<SpeechFile>,
+): Promise<SpeechFile> {
   const controller = new AbortController();
   if (session) {
     const set = inFlight.get(session) ?? new Set();
@@ -51,28 +52,55 @@ async function synthesizeOpenAi(voice: OpenAiVoice, text: string, session?: stri
     inFlight.set(session, set);
   }
   // The timeout aborts the request itself (and reading its body), rather than abandoning it.
-  const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(OPENAI_TIMEOUT_MS)]);
+  const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]);
   try {
-    const response = await fetch(voice.endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${voice.apiKey}` },
-      body: JSON.stringify({ model: voice.model, voice: voice.voice, input: text, response_format: "mp3" }),
-      signal,
-    });
-    if (!response.ok) {
-      const detail = (await response.text().catch(() => "")).slice(0, 200).trim();
-      throw new Error(`OpenAI TTS request failed (${response.status})${detail ? ": " + detail : ""}`);
-    }
-    return { base64: Buffer.from(await response.arrayBuffer()).toString("base64"), mimeType: "audio/mpeg" };
+    // This runs on Node; React Native also declares a global fetch with a different signal type.
+    return await request(signal as RequestInit["signal"]);
   } catch (error) {
     if (controller.signal.aborted) throw new Cancelled();
-    if (signal.aborted) throw new Error("OpenAI TTS request timed out");
+    if (signal.aborted) throw new Error(`${provider} TTS request timed out`);
     throw error;
   } finally {
     const set = session ? inFlight.get(session) : undefined;
     set?.delete(controller);
     if (session && set?.size === 0) inFlight.delete(session);
   }
+}
+
+async function synthesizeOpenAi(voice: OpenAiVoice, text: string, session?: string): Promise<SpeechFile> {
+  if (!voice.apiKey) {
+    throw new Error("OpenAI TTS is selected in Paseo's voice settings but no API key is configured");
+  }
+  return withSpeechRequest("OpenAI", session, async (signal) => {
+    const request = (format: "pcm" | "mp3") => fetch(voice.endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${voice.apiKey}` },
+      body: JSON.stringify({ model: voice.model, voice: voice.voice, input: text, response_format: format }),
+      signal,
+    });
+    let format = mp3Endpoints.has(voice.endpoint) ? "mp3" as const : "pcm" as const;
+    let response = await request(format);
+    if (!response.ok) {
+      const detail = await response.text();
+      if (format === "pcm" && response.status === 400 && /\b(?:\w*format|pcm)\b/i.test(detail)) {
+        mp3Endpoints.add(voice.endpoint);
+        format = "mp3";
+        response = await request(format);
+      } else {
+        throw openAiError(response.status, detail);
+      }
+    }
+    if (!response.ok) throw openAiError(response.status, await response.text());
+    const body = await response.arrayBuffer();
+    return format === "pcm"
+      ? pcm16Clip(body)
+      : { base64: Buffer.from(body).toString("base64"), mimeType: "audio/mpeg" };
+  });
+}
+
+function openAiError(status: number, body: string): Error {
+  const detail = body.slice(0, 200).trim();
+  return new Error(`OpenAI TTS request failed (${status})${detail ? ": " + detail : ""}`);
 }
 
 // ---------- Local voices ----------
@@ -252,13 +280,31 @@ function encodeWav(samples: ArrayLike<number>, sampleRate: number, start = 0, en
   buffer.writeUInt16LE(16, 34);
   buffer.write("data", 36);
   buffer.writeUInt32LE(count * 2, 40);
-  // Write through a typed view (WAV is little-endian, as are the hosts Paseo runs on).
-  const pcm = new Int16Array(buffer.buffer, buffer.byteOffset + 44, count);
   for (let i = 0; i < count; i++) {
     const value = Math.max(-1, Math.min(1, samples[start + i]));
-    pcm[i] = Math.round(value < 0 ? value * 0x8000 : value * 0x7fff);
+    buffer.writeInt16LE(Math.round(value < 0 ? value * 0x8000 : value * 0x7fff), 44 + i * 2);
   }
   return buffer;
+}
+
+export function pcmClip(samples: ArrayLike<number>, sampleRate: number): SpeechFile {
+  const { start, end } = trimSilence(samples, sampleRate);
+  return {
+    base64: encodeWav(samples, sampleRate, start, end).toString("base64"),
+    mimeType: "audio/wav",
+    durationMs: ((end - start) / sampleRate) * 1000,
+  };
+}
+
+function pcm16Clip(body: ArrayBuffer): SpeechFile {
+  if (body.byteLength % 2 !== 0) throw new Error("Speech response contained incomplete PCM audio");
+  const pcm = new DataView(body);
+  const samples = new Float32Array(body.byteLength / 2);
+  for (let i = 0; i < samples.length; i++) {
+    const sample = pcm.getInt16(i * 2, true);
+    samples[i] = sample / (sample < 0 ? 0x8000 : 0x7fff);
+  }
+  return pcmClip(samples, CLOUD_SAMPLE_RATE);
 }
 
 async function synthesizeLocal(voice: LocalVoice, text: string, session?: string): Promise<SpeechFile> {
@@ -271,19 +317,16 @@ async function synthesizeLocal(voice: LocalVoice, text: string, session?: string
   });
   queue = run.catch(() => undefined);
   const audio = await run;
-  const { start, end } = trimSilence(audio.samples, audio.sampleRate);
-  return {
-    base64: encodeWav(audio.samples, audio.sampleRate, start, end).toString("base64"),
-    mimeType: "audio/wav",
-    durationMs: ((end - start) / audio.sampleRate) * 1000,
-  };
+  return pcmClip(audio.samples, audio.sampleRate);
 }
 
 /** Speaks one chunk with the voice chosen in Paseo's voice settings. */
-export async function synthesize({ text, session }: { text: string; session?: string }): Promise<SpeechFile> {
+export async function synthesize({ text, session, localOnly }: SpeechRequest): Promise<SpeechFile> {
   if (!text.trim()) throw new Error("Nothing to read aloud");
   if (isCancelled(session)) throw new Cancelled();
   const voice = resolveVoice();
+  // Cached client status can be stale when the voice settings change.
+  if (localOnly && voice.provider !== "local") throw new Error("Only local voices can be prefetched");
   return voice.provider === "openai" ? synthesizeOpenAi(voice, text, session) : synthesizeLocal(voice, text, session);
 }
 

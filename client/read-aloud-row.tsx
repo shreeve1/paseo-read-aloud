@@ -64,7 +64,7 @@ function usePhase(player: Player, key: string): Phase {
 
 export function createReadAloudRow(client: PluginClientContext) {
   const player = createPlayer({
-    speak: (text, session) => client.rpc(synthesizeSpeech, { text, session }),
+    speak: (input) => client.rpc(synthesizeSpeech, input),
     cancel: (session) => client.rpc(cancelSpeech, { session }),
     playAudio: (audio) => client.playAudio(audio),
   });
@@ -122,21 +122,20 @@ export function createReadAloudRow(client: PluginClientContext) {
           disabled={phase === "stopping"}
           hitSlop={8}
           onPressIn={() => {
-            // Touch-down comes well before the press completes: start the first chunk now.
-            if (!broken && !busy) player.prefetch(key, item.data.text);
+            if (!broken && !busy && voice?.provider === "local") player.prefetch(key, item.data.text, agentId);
           }}
           onPress={() => {
             if (broken) {
               setPinned((open) => !open);
               void refreshStatus(client, true);
             } else if (busy) player.stop(key);
-            else void player.play(key, item.data.text, onError);
+            else void player.play(key, item.data.text, onError, agentId);
           }}
           onHoverIn={() => {
             setHovered(true);
-            // Local voices are free to prepare ahead; OpenAI ones cost money, so wait for a press.
+            // Only local voices can be prefetched without a paid request.
             if (broken || busy || voice?.provider !== "local") return;
-            hoverTimer.current = setTimeout(() => player.prefetch(key, item.data.text), HOVER_PREFETCH_MS);
+            hoverTimer.current = setTimeout(() => player.prefetch(key, item.data.text, agentId), HOVER_PREFETCH_MS);
           }}
           onHoverOut={() => {
             setHovered(false);

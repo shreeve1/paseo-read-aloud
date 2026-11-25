@@ -1,4 +1,5 @@
 import { toChunks, toSpeech } from "../shared/text";
+import type { SpeechFile, SpeechRequest } from "../shared/speech";
 
 /**
  * Reads one reply at a time. Kept free of React and Paseo imports so it can be tested with a fake
@@ -9,11 +10,11 @@ import { toChunks, toSpeech } from "../shared/text";
  */
 
 export type Phase = "idle" | "loading" | "playing" | "stopping";
-export type AudioData = { base64: string; mimeType: string; durationMs?: number };
+export type AudioData = SpeechFile;
 
 export interface PlayerHost {
   /** Generates one chunk. `session` groups one press's chunks so they can be cancelled together. */
-  speak(text: string, session: string): Promise<AudioData>;
+  speak(input: SpeechRequest & { session: string }): Promise<AudioData>;
   /** Drops a session's queued chunks on the host. */
   cancel(session: string): Promise<unknown>;
   /** Paseo's shared audio queue: resolves when the clip finishes, cannot be interrupted. */
@@ -31,6 +32,10 @@ type Run = { key: string; session: string; stopped: boolean };
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, ms)));
 const newSession = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+
+function chunkRequest(chunks: string[], index: number, session: string, agentId?: string) {
+  return { text: chunks[index], session, agentId, previous: chunks[index - 1], next: chunks[index + 1] };
+}
 
 export function createPlayer(host: PlayerHost, options = PLAYER_DEFAULTS) {
   let current: { run: Run; phase: Exclude<Phase, "idle"> } | null = null;
@@ -52,16 +57,17 @@ export function createPlayer(host: PlayerHost, options = PLAYER_DEFAULTS) {
     if (current?.run === run) setPhase(run, "stopping");
   }
 
-  function prefetch(key: string, text: string) {
+  function prefetch(key: string, text: string, agentId?: string) {
     if (warm.has(key)) return;
-    const first = toChunks(toSpeech(text))[0];
-    if (!first) return;
+    const chunks = toChunks(toSpeech(text));
+    if (!chunks.length) return;
     const session = newSession();
-    warm.set(key, { session, first: host.speak(first, session).catch(() => null) });
+    const first = host.speak({ ...chunkRequest(chunks, 0, session, agentId), localOnly: true });
+    warm.set(key, { session, first: first.catch(() => null) });
     if (warm.size > 20) warm.delete(warm.keys().next().value as string);
   }
 
-  async function play(key: string, text: string, onError: (error: unknown) => void) {
+  async function play(key: string, text: string, onError: (error: unknown) => void, agentId?: string) {
     if (current) stopRun(current.run);
     const cached = warm.get(key);
     warm.delete(key);
@@ -74,7 +80,7 @@ export function createPlayer(host: PlayerHost, options = PLAYER_DEFAULTS) {
     const pending: Promise<AudioData>[] = [];
     const request = (index: number) => {
       if (index >= chunks.length || index in pending) return;
-      const speak = () => host.speak(chunks[index], run.session);
+      const speak = () => host.speak(chunkRequest(chunks, index, run.session, agentId));
       pending[index] = index === 0 && cached ? cached.first.then((audio) => audio ?? speak()) : speak();
       pending[index].catch(() => undefined);
     };
