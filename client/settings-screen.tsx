@@ -2,12 +2,13 @@ import { useRpc, useSettings, type PluginClientContext, type PluginSurfaceProps,
 import {
   SettingsAction, SettingsCard, SettingsInput, SettingsSection, SettingsSelect, SettingsSwitch, type SettingsInputHandle,
 } from "@getpaseo/plugin/client/ui";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Text } from "react-native";
 import { elevenLabsClearKey, elevenLabsKeyStatus, elevenLabsSaveKey, elevenLabsVoices } from "../shared/elevenlabs";
 import { deviceSettings, voiceSettings, type VoiceSettings } from "../shared/settings";
 import { synthesizeSpeech } from "../shared/speech";
+import { voiceModeConnect, voiceModeStatus } from "../shared/voice-mode";
 import { voiceStatusQueryKey } from "./voice-status";
 
 const PROVIDERS = [
@@ -149,6 +150,7 @@ function ElevenLabsControls({ settings, theme, testAction }: { settings: ReadyVo
           {testAction}
         </SettingsCard>
       </SettingsSection>
+      <VoiceModeControls theme={theme} />
       {account.length && hasKey ? (
         <SettingsSection title="Voices for other agents">
           <SettingsCard>
@@ -164,6 +166,47 @@ function ElevenLabsControls({ settings, theme, testAction }: { settings: ReadyVo
         </SettingsSection>
       ) : null}
     </>
+  );
+}
+
+function VoiceModeControls({ theme }: { theme: Theme }) {
+  const getStatus = useRpc(voiceModeStatus);
+  const connect = useRpc(voiceModeConnect);
+  const status = useQuery({
+    queryKey: ["read-aloud", "voice-mode.status"],
+    queryFn: () => getStatus({}),
+    retry: false,
+  });
+  const change = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      const result = await connect({ enabled });
+      if (!result.ok) throw new Error(result.error ?? "Could not change Paseo's Speaking settings.");
+    },
+    onSettled: () => status.refetch(),
+  });
+
+  const connected = status.data?.connected ?? false;
+  const bridge = status.data?.listening ? "The speech bridge is listening on this host."
+    : status.data?.error ? "The speech bridge could not start."
+    : status.isPending ? "Checking the speech bridge..." : "The speech bridge is not listening.";
+  const hint = status.isError ? undefined
+    : connected ? bridge + " Paseo's Speaking settings show the local Base URL." : bridge;
+  const error = change.error?.message ?? (status.isError
+    ? "Could not check Paseo's Speaking settings." : status.data?.error);
+
+  return (
+    <SettingsSection title="Paseo Voice mode">
+      <SettingsCard>
+        <SettingsSwitch label="Use this voice in Voice mode" value={connected} hint={hint}
+          disabled={change.isPending || status.isFetching || status.isError || (!connected && !status.data?.listening)}
+          onValueChange={(enabled) => change.mutate(enabled)} />
+        {status.isError ? (
+          <SettingsAction label="Check bridge status" actionLabel="Retry"
+            onPress={() => void status.refetch()} />
+        ) : null}
+      </SettingsCard>
+      {error ? <Message theme={theme} text={error} error /> : null}
+    </SettingsSection>
   );
 }
 
