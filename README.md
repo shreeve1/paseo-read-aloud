@@ -1,8 +1,8 @@
 # Read Aloud for Paseo
 
 A [Paseo](https://paseo.sh) plugin that adds a speaker button under each finished agent reply.
-Press it to hear the reply. Press again to stop. Read Aloud can use an ElevenLabs voice or follow
-Paseo's own voice settings for local speech or OpenAI.
+Press it to hear the reply. Press again to stop. On a managed host, choose a Central voice or
+use Paseo's local voice. On a personal install, use ElevenLabs directly or follow Paseo's voice settings.
 
 ![Read Aloud button under a reply](assets/screenshot.png)
 
@@ -16,7 +16,7 @@ paseo plugin add /absolute/path/to/paseo-read-aloud
 
 ## Choose a voice
 
-Open **Settings > Plugins** and select the cog next to **Read Aloud**.
+On a personal install, open **Settings > Plugins** and select the cog next to **Read Aloud**.
 
 - To follow Paseo, leave **Voice source** set to **Paseo voice settings**. For local speech, download
   a voice in **Settings > Voice** first.
@@ -32,7 +32,21 @@ Read Aloud saves the ElevenLabs key on the daemon host in
 `<paseo-home>/plugin-data/read-aloud/elevenlabs-key`. See [the overview](OVERVIEW.md#data) for which
 providers receive reply text.
 
-## Voice mode
+## Central voice on a managed host
+
+Open **Settings > Plugins > Read Aloud**. Select **Central voice** and choose an approved voice.
+You don't need an ElevenLabs key. **Refresh** checks the current list and clears your selection
+if the voice was removed. If Central voice can't play, select **Paseo voice settings (local)**
+and use a downloaded voice from **Settings > Voice**.
+
+Managed Read Aloud plays on demand. During the pilot, press the speaker under a reply that
+says “The blue notebook is on the shelf.” Automatic reading and **Test voice** are unavailable.
+Paseo's separate Voice mode uses its own local speaking and listening settings in the pilot.
+
+Your administrator sets up the private service. See the [hub protocol](shared/hub-protocol-v1.json)
+for the required host files and credential helper.
+
+## Voice mode on a personal install
 
 With **ElevenLabs** selected, turn on **Use this voice in Voice mode** to hear Paseo Voice mode
 replies in your main Read Aloud voice. The switch changes Paseo's **Speaking** provider to
@@ -53,7 +67,7 @@ Voice mode cannot speak until you re-enable it or change the **Speaking** settin
 
 | Path | What it does |
 | --- | --- |
-| `index.server.ts`, `server/` | Adds reply rows, stores the ElevenLabs key, and generates speech |
+| `index.server.ts`, `server/` | Adds reply rows and generates speech using the host's configured mode |
 | `index.client.tsx`, `client/` | Settings screen, reply button, and playback |
 | `shared/` | Settings and request shapes shared by the client and daemon |
 | `shared/text.ts` | Markdown-to-speech cleanup and chunking (no dependencies) |
@@ -62,12 +76,12 @@ Voice mode cannot speak until you re-enable it or change the **Speaking** settin
 ## Develop
 
 ```sh
-npm install
+npm ci
 npm run typecheck
 npm test
 ```
 
-Tests use Node's built-in TypeScript support and do not need an API key.
+Tests use Node's built-in TypeScript support and OpenSSL for disposable certificates. They do not need an API key.
 
 ## License
 

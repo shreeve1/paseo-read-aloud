@@ -17,17 +17,17 @@ C#, are kept). The text is spoken a sentence or two at a time.
 Read Aloud prepares and plays short clips:
 
 - The first part is short so playback can start sooner.
-- Local voices are loaded as soon as a chat is open, and the first part is
-  prepared when you touch the button (or hover over it for a moment on
-  desktop), before the press finishes.
+- Local voices are loaded when a chat opens. On personal installs, Read Aloud
+  prepares the first local clip when you touch the button or hover over it
+  on desktop.
 - Read Aloud trims padding silence from WAV clips and queues the next clip
   shortly before the current clip ends. OpenAI-compatible endpoints that reject
   raw audio fall back to MP3, where a short gap can remain.
 - Stopping drops any parts still waiting to be prepared, so the next press
   isn't held up behind them.
 
-When **Voice source** is set to **Paseo voice settings**, Read Aloud uses the
-same voice as Paseo's voice mode. It checks voice environment variables, then
+On a personal install, **Paseo voice settings** uses the same voice as
+Paseo's Voice mode. Read Aloud checks the voice environment variables, then
 **Settings > Voice**, then Paseo's default voice.
 
 - Local: whichever downloaded voice is selected (Kokoro, Kokoro Lite, Kitten or
@@ -45,7 +45,26 @@ the main voice.
 
 Paseo plays the audio on the device that starts playback.
 
-## Setup
+## Managed hosts
+
+**Central voice** uses a private speech service. Select a voice from the approved
+list in Read Aloud settings. Refreshing the list clears a saved voice that is no
+longer approved. If the service can't play the reply, Read Aloud explains why.
+Switch to **Paseo voice settings (local)** to use a downloaded voice instead.
+
+Managed Read Aloud plays only when you press the speaker. For the pilot, use a
+reply that says exactly “The blue notebook is on the shelf.” Managed hosts don't
+show **Test voice**, automatic reading, API key controls, or the switch that
+connects Read Aloud to Paseo Voice mode. The pilot keeps Voice mode speaking and
+listening local.
+
+The server selects its mode at startup. Without a managed configuration file it
+uses personal mode. When the file is present, the configuration, CA certificate,
+and helper must be owned by root and writable by neither the group nor other
+users. If the files are invalid or incomplete, Central voice stays unavailable.
+See the [hub protocol](shared/hub-protocol-v1.json) for paths and formats.
+
+## Personal setup
 
 Open **Settings > Plugins** and select the cog next to **Read Aloud**. To use
 ElevenLabs, select that source, save an API key, and choose a voice. A daemon
@@ -58,7 +77,7 @@ of completion, provided no reply is already playing. A browser can block
 automatic playback until you interact with the page. You can still press the
 speaker button yourself.
 
-## Voice mode
+## Voice mode on a personal install
 
 With **ElevenLabs** selected, turn on **Use this voice in Voice mode** to hear
 Paseo Voice mode replies in your main Read Aloud voice. The switch sets
@@ -76,7 +95,14 @@ change Paseo's **Speaking** settings.
 ## Data
 
 Local speech generates audio on the daemon host and sends the finished audio to
-the client for playback. OpenAI and ElevenLabs receive the cleaned reply text
+the client for playback. For Central voice, the daemon verifies the private hub's
+certificate and host name before sending the existing hosted login credential
+and the current text chunk. Adjacent chunks stay on the daemon. The plugin does
+not store another copy of the credential, start a speech bridge, or send requests
+directly to ElevenLabs. The hub holds the ElevenLabs key and enforces the pilot's
+synthetic text restriction.
+
+On a personal install, OpenAI and ElevenLabs receive the cleaned reply text
 in short chunks. ElevenLabs also receives the text of adjacent chunks to help
 keep the delivery consistent. If a model rejects that extra text, Read Aloud
 retries without it. Cloud requests can start when you press the speaker button,
@@ -99,6 +125,6 @@ setting stays on the device.
   part currently playing (usually a few seconds). The button shows it is
   stopping until then.
 - Reading carries on if you scroll the reply out of view.
-- About 20,000 characters of a reply are read per press.
+- Personal installs read up to about 20,000 characters of a reply per press.
 - The selected voice and model determine which languages are available.
 - Replies that finished before the plugin was enabled have no speaker button.
