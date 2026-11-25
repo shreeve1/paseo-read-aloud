@@ -6,7 +6,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Text } from "react-native";
 import { elevenLabsClearKey, elevenLabsKeyStatus, elevenLabsSaveKey, elevenLabsVoices } from "../shared/elevenlabs";
-import { voiceSettings, type VoiceSettings } from "../shared/settings";
+import { deviceSettings, voiceSettings, type VoiceSettings } from "../shared/settings";
 import { synthesizeSpeech } from "../shared/speech";
 import { voiceStatusQueryKey } from "./voice-status";
 
@@ -162,6 +162,32 @@ function ElevenLabsControls({ settings, theme }: { settings: ReadyVoiceSettings;
   );
 }
 
+function DeviceControls({ theme }: { theme: Theme }) {
+  const settings = useSettings(deviceSettings);
+  return (
+    <SettingsSection title="This device">
+      {settings.status === "ready" ? (
+        <SettingsCard>
+          <SettingsSwitch label="Read new replies automatically" value={settings.values.autoRead}
+            disabled={settings.saving} onValueChange={(autoRead) => void settings.save({ autoRead }, settings.revision)} />
+        </SettingsCard>
+      ) : settings.status === "loading" ? (
+        <Message theme={theme} text="Loading settings..." />
+      ) : (
+        <SettingsCard>
+          <SettingsAction label="Could not load device settings" error={settings.error} actionLabel="Reload"
+            disabled={settings.saving} onPress={() => void settings.reload()} />
+          {settings.status === "invalid" ? (
+            <SettingsAction label="Restore default device settings" actionLabel="Reset"
+              disabled={settings.saving} onPress={() => void settings.reset()} />
+          ) : null}
+        </SettingsCard>
+      )}
+      {settings.saveError ? <Message theme={theme} text={settings.saveError} error /> : null}
+    </SettingsSection>
+  );
+}
+
 export function createVoiceSettingsScreen(client: PluginClientContext) {
   return function VoiceSettingsScreen({ theme }: PluginSurfaceProps) {
     const settings = useSettings(voiceSettings);
@@ -221,6 +247,7 @@ export function createVoiceSettingsScreen(client: PluginClientContext) {
             </SettingsCard>
           </SettingsSection>
         ) : null}
+        <DeviceControls theme={theme} />
       </>
     );
   };

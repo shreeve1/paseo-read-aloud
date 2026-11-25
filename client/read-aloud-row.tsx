@@ -1,8 +1,10 @@
 import type { PluginClientContext, PluginTimelineItemProps } from "@getpaseo/plugin/client";
+import { useSettings } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { z } from "zod";
+import { deviceSettings } from "../shared/settings";
 import { cancelSpeech, readAloudSchema, synthesizeSpeech } from "../shared/speech";
 import { createPlayer, type Phase, type Player } from "./player";
 import { useVoiceStatus } from "./voice-status";
@@ -23,13 +25,15 @@ export function createReadAloudRow(client: PluginClientContext) {
     playAudio: (audio) => client.playAudio(audio),
   });
 
-  return function ReadAloudRow({ agentId, item, theme }: Props) {
+  return function ReadAloudRow({ agentId, host, item, timestamp, theme }: Props) {
     // Stable across remounts, so a row scrolled back into view shows the reading in progress.
-    const key = `${agentId}:${(item as { id?: string }).id ?? item.data.text.slice(0, 200)}`;
+    const rowId = "id" in item && typeof item.id === "string" ? item.id : timestamp.getTime();
+    const key = `${host.id}:${agentId}:${rowId}`;
     const phase = usePhase(player, key);
     const [hovered, setHovered] = useState(false);
     const [pinned, setPinned] = useState(false);
     const { data: voice, refetch } = useVoiceStatus();
+    const device = useSettings(deviceSettings);
     const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const toast = useToast();
     useEffect(
@@ -40,9 +44,15 @@ export function createReadAloudRow(client: PluginClientContext) {
     );
 
     const broken = voice?.ok === false;
+    const isLocal = voice?.provider === "local";
+    const autoRead = device.status === "ready" && device.values.autoRead;
     const busy = phase !== "idle";
     const showHelp = broken && (pinned || hovered);
     const muted = theme.colors.foregroundMuted;
+
+    useEffect(() => {
+      if (autoRead && !broken) void player.autoPlay(key, item.data.text, item.data.createdAt, agentId, isLocal);
+    }, [autoRead, broken, isLocal, key, item.data.text, item.data.createdAt, agentId]);
 
     function onError(error: unknown) {
       // Show the warning with fix-up steps if the voice is the problem; otherwise a toast.
@@ -76,19 +86,19 @@ export function createReadAloudRow(client: PluginClientContext) {
           disabled={phase === "stopping"}
           hitSlop={8}
           onPressIn={() => {
-            if (!broken && !busy && voice?.provider === "local") player.prefetch(key, item.data.text, agentId);
+            if (!broken && !busy && isLocal) player.prefetch(key, item.data.text, agentId);
           }}
           onPress={() => {
             if (broken) {
               setPinned((open) => !open);
               void refetch();
             } else if (busy) player.stop(key);
-            else void player.play(key, item.data.text, onError, agentId, voice?.provider === "local");
+            else void player.play(key, item.data.text, onError, agentId, isLocal);
           }}
           onHoverIn={() => {
             setHovered(true);
             // Only local voices can be prefetched without a paid request.
-            if (broken || busy || voice?.provider !== "local") return;
+            if (broken || busy || !isLocal) return;
             hoverTimer.current = setTimeout(() => player.prefetch(key, item.data.text, agentId), HOVER_PREFETCH_MS);
           }}
           onHoverOut={() => {

@@ -46,4 +46,4 @@ export type VoiceStatus = z.output<typeof voiceStatus.output>;
 
 /** Timeline row added under each finished reply. */
 export const READ_ALOUD_KIND = "read-aloud";
-export const readAloudSchema = z.object({ text: z.string() });
+export const readAloudSchema = z.object({ text: z.string(), createdAt: z.number().optional() });

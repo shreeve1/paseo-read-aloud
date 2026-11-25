@@ -38,6 +38,6 @@ export async function addReadAloudRow(event: PluginHookPayload<"agent.turn.after
     id: "reply-" + (event.turnId ?? String(last?.seqEnd ?? Date.now())),
     kind: READ_ALOUD_KIND,
     version: 1,
-    data: { text: reply.slice(0, MAX_ROW_TEXT) },
+    data: { text: reply.slice(0, MAX_ROW_TEXT), createdAt: Date.now() },
   });
 }

@@ -160,3 +160,25 @@ test("a synthesis error is reported and the button resets", async () => {
   assert.match(String(reported), /voice broke/);
   assert.equal(player.phase("row"), "idle");
 });
+
+test("auto-read skips old and busy rows and never retries a row blocked by autoplay", async () => {
+  const calls: string[] = [];
+  const host: PlayerHost = {
+    async speak({ text }) {
+      calls.push(text);
+      return { base64: "", mimeType: "audio/wav" };
+    },
+    async cancel() {},
+    async playAudio() { throw new Error("autoplay blocked"); },
+  };
+  const player = createPlayer(host);
+  const now = Date.now();
+  assert.equal(player.autoPlay("old", "Old", now - 21_000, "agent", false), undefined);
+  assert.equal(player.autoPlay("legacy", "Legacy", undefined, "agent", false), undefined);
+  const playing = player.autoPlay("new", "New", now, "agent", false);
+  assert.ok(playing);
+  assert.equal(player.autoPlay("busy", "Busy", now, "agent", false), undefined);
+  await playing;
+  assert.equal(createPlayer(host).autoPlay("new", "New", now, "agent", false), undefined);
+  assert.deepEqual(calls, ["New"]);
+});

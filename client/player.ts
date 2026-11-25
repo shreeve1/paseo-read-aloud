@@ -32,6 +32,8 @@ type Run = { key: string; session: string; stopped: boolean };
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, ms)));
 const newSession = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+const AUTO_READ_WINDOW_MS = 20_000;
+const autoPlayed = new Set<string>();
 
 function chunkRequest(chunks: string[], index: number, session: string, agentId?: string) {
   return { text: chunks[index], session, agentId, previous: chunks[index - 1], next: chunks[index + 1] };
@@ -99,8 +101,8 @@ export function createPlayer(host: PlayerHost, options = PLAYER_DEFAULTS) {
         setPhase(run, "playing");
         const started = queued;
         const done = host.playAudio(audio).catch(() => {
-          // Paseo's voice controls or a plugin reload interrupted playback.
-          run.stopped = true;
+          // Browser autoplay rules, voice controls, or a reload can interrupt playback.
+          stopRun(run);
         });
         queued = done;
         // Paseo's queue can't be cleared, so hand over one clip at a time, just before the
@@ -121,6 +123,11 @@ export function createPlayer(host: PlayerHost, options = PLAYER_DEFAULTS) {
   return {
     play,
     prefetch,
+    autoPlay(key: string, text: string, createdAt: number | undefined, agentId: string, usePrefetch: boolean) {
+      if (current || createdAt === undefined || Math.abs(Date.now() - createdAt) > AUTO_READ_WINDOW_MS || autoPlayed.has(key)) return;
+      autoPlayed.add(key);
+      return play(key, text, () => undefined, agentId, usePrefetch);
+    },
     /** Stops the reply with this key, if it is the one reading. */
     stop(key: string) {
       if (current?.run.key === key) stopRun(current.run);
