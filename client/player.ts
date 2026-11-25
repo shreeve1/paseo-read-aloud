@@ -67,9 +67,9 @@ export function createPlayer(host: PlayerHost, options = PLAYER_DEFAULTS) {
     if (warm.size > 20) warm.delete(warm.keys().next().value as string);
   }
 
-  async function play(key: string, text: string, onError: (error: unknown) => void, agentId?: string) {
+  async function play(key: string, text: string, onError: (error: unknown) => void, agentId?: string, usePrefetch = true) {
     if (current) stopRun(current.run);
-    const cached = warm.get(key);
+    const cached = usePrefetch ? warm.get(key) : undefined;
     warm.delete(key);
     // Each press gets its own run: a stopped press can never be revived by the next one.
     const run: Run = { key, session: cached?.session ?? newSession(), stopped: false };

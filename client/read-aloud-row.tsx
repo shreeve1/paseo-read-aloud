@@ -3,60 +3,14 @@ import { Icon, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { z } from "zod";
-import { cancelSpeech, readAloudSchema, synthesizeSpeech, voiceStatus, type VoiceStatus } from "../shared/speech";
+import { cancelSpeech, readAloudSchema, synthesizeSpeech } from "../shared/speech";
 import { createPlayer, type Phase, type Player } from "./player";
+import { useVoiceStatus } from "./voice-status";
 
 type Props = PluginTimelineItemProps<z.output<typeof readAloudSchema>>;
 
 /** Hovering this long counts as intent to press; shorter passes over the button cost nothing. */
 const HOVER_PREFETCH_MS = 250;
-
-// ---------- Voice status (shared by every row) ----------
-
-/**
- * One voice check shared by every row, refreshed at most every 15 seconds, so a long chat does
- * not send a request per reply. Rows subscribe and all update together.
- */
-const STATUS_TTL_MS = 15_000;
-let status: { value: VoiceStatus | null; checkedAt: number; pending: Promise<void> | null } = {
-  value: null,
-  checkedAt: 0,
-  pending: null,
-};
-const statusListeners = new Set<(value: VoiceStatus) => void>();
-
-function publish(value: VoiceStatus) {
-  status = { value, checkedAt: Date.now(), pending: null };
-  for (const listener of statusListeners) listener(value);
-}
-
-function refreshStatus(client: PluginClientContext, force = false): Promise<void> {
-  if (status.pending) return status.pending;
-  if (!force && status.value && Date.now() - status.checkedAt < STATUS_TTL_MS) return Promise.resolve();
-  const pending = client
-    .rpc(voiceStatus, {})
-    .then(publish)
-    .catch(() => {
-      // The plugin is restarting or the host is offline; keep showing the last known state.
-      status = { ...status, pending: null };
-    });
-  status = { ...status, pending };
-  return pending;
-}
-
-function useVoiceStatus(client: PluginClientContext): VoiceStatus | null {
-  const [value, setValue] = useState<VoiceStatus | null>(status.value);
-  useEffect(() => {
-    statusListeners.add(setValue);
-    void refreshStatus(client);
-    return () => {
-      statusListeners.delete(setValue);
-    };
-  }, []);
-  return value;
-}
-
-// ---------- Row ----------
 
 function usePhase(player: Player, key: string): Phase {
   return useSyncExternalStore(player.subscribe, () => player.phase(key));
@@ -75,7 +29,7 @@ export function createReadAloudRow(client: PluginClientContext) {
     const phase = usePhase(player, key);
     const [hovered, setHovered] = useState(false);
     const [pinned, setPinned] = useState(false);
-    const voice = useVoiceStatus(client);
+    const { data: voice, refetch } = useVoiceStatus();
     const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const toast = useToast();
     useEffect(
@@ -92,8 +46,8 @@ export function createReadAloudRow(client: PluginClientContext) {
 
     function onError(error: unknown) {
       // Show the warning with fix-up steps if the voice is the problem; otherwise a toast.
-      void refreshStatus(client, true).then(() => {
-        if (status.value?.ok !== false) toast.error(error instanceof Error ? error.message : "Read aloud failed");
+      void refetch().then(({ data }) => {
+        if (data?.ok !== false) toast.error(error instanceof Error ? error.message : "Read aloud failed");
         else setPinned(true);
       });
     }
@@ -127,9 +81,9 @@ export function createReadAloudRow(client: PluginClientContext) {
           onPress={() => {
             if (broken) {
               setPinned((open) => !open);
-              void refreshStatus(client, true);
+              void refetch();
             } else if (busy) player.stop(key);
-            else void player.play(key, item.data.text, onError, agentId);
+            else void player.play(key, item.data.text, onError, agentId, voice?.provider === "local");
           }}
           onHoverIn={() => {
             setHovered(true);
