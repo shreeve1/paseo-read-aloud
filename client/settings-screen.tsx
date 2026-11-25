@@ -3,7 +3,7 @@ import {
   SettingsAction, SettingsCard, SettingsInput, SettingsSection, SettingsSelect, SettingsSwitch, type SettingsInputHandle,
 } from "@getpaseo/plugin/client/ui";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Text } from "react-native";
 import { elevenLabsClearKey, elevenLabsKeyStatus, elevenLabsSaveKey, elevenLabsVoices } from "../shared/elevenlabs";
 import { deviceSettings, voiceSettings, type VoiceSettings } from "../shared/settings";
@@ -34,7 +34,7 @@ function Message({ theme, text, error = false }: { theme: Theme; text: string; e
     style={{ color: error ? theme.colors.statusDanger : theme.colors.foregroundMuted }}>{text}</Text>;
 }
 
-function ElevenLabsControls({ settings, theme }: { settings: ReadyVoiceSettings; theme: Theme }) {
+function ElevenLabsControls({ settings, theme, testAction }: { settings: ReadyVoiceSettings; theme: Theme; testAction: ReactNode }) {
   const getKey = useRpc(elevenLabsKeyStatus);
   const saveKey = useRpc(elevenLabsSaveKey);
   const clearKey = useRpc(elevenLabsClearKey);
@@ -101,6 +101,7 @@ function ElevenLabsControls({ settings, theme }: { settings: ReadyVoiceSettings;
   const hasKey = key.data?.saved === true;
   const unavailable = settings.saving || keyBusy || !hasKey;
   const voiceLoading = !unavailable && voices.isFetching && !voices.data;
+  const refreshing = !unavailable && voices.isFetching && Boolean(voices.data);
 
   return (
     <>
@@ -134,6 +135,9 @@ function ElevenLabsControls({ settings, theme }: { settings: ReadyVoiceSettings;
               const voice = account.find(({ id }) => id === voiceId);
               if (voice) void edit({ voiceId, voiceName: voice.name, agentVoices: values.agentVoices.filter(({ id }) => id !== voiceId) });
             }} />
+          <SettingsAction label="Voice list" hint="Loads voices added in the ElevenLabs console"
+            actionLabel={refreshing ? "Refreshing..." : "Refresh"} disabled={unavailable || voices.isFetching}
+            onPress={() => void queryClient.invalidateQueries({ queryKey: VOICES_QUERY })} />
           {voices.isError && !unavailable ? (
             <SettingsAction label="Could not load voices" error={voices.error.message} actionLabel="Retry"
               onPress={() => void voices.refetch()} />
@@ -142,6 +146,7 @@ function ElevenLabsControls({ settings, theme }: { settings: ReadyVoiceSettings;
             onValueChange={(model) => void edit({ model })} />
           <SettingsSelect label="Speed" value={String(values.speed)} options={SPEEDS} disabled={settings.saving}
             onValueChange={(speed) => void edit({ speed: Number(speed) })} />
+          {testAction}
         </SettingsCard>
       </SettingsSection>
       {account.length && hasKey ? (
@@ -208,6 +213,12 @@ export function createVoiceSettingsScreen(client: PluginClientContext) {
       }
     }
 
+    const testAction = (
+      <SettingsAction label="Test voice" actionLabel={testing ? "Testing..." : "Play"}
+        disabled={testing || settings.saving} error={testError || undefined} onPress={() => void testVoice()} />
+    );
+    const elevenLabs = settings.status === "ready" && settings.values.provider === "elevenlabs";
+
     return (
       <>
         <SettingsSection title="Voice source">
@@ -236,15 +247,10 @@ export function createVoiceSettingsScreen(client: PluginClientContext) {
               disabled={settings.saving} onPress={() => void settings.reload()} />
           ) : null}
         </SettingsSection>
-        {settings.status === "ready" && settings.values.provider === "elevenlabs" ? (
-          <ElevenLabsControls settings={settings} theme={theme} />
-        ) : null}
-        {settings.status === "ready" ? (
+        {elevenLabs ? <ElevenLabsControls settings={settings} theme={theme} testAction={testAction} /> : null}
+        {settings.status === "ready" && !elevenLabs ? (
           <SettingsSection title="Preview">
-            <SettingsCard>
-              <SettingsAction label="Test voice" actionLabel={testing ? "Testing..." : "Play"}
-                disabled={testing || settings.saving} error={testError || undefined} onPress={() => void testVoice()} />
-            </SettingsCard>
+            <SettingsCard>{testAction}</SettingsCard>
           </SettingsSection>
         ) : null}
         <DeviceControls theme={theme} />
