@@ -46,9 +46,10 @@ const CLOUD_SAMPLE_RATE = 24_000;
 const mp3Endpoints = new Set<string>();
 const modelsWithoutContext = new Set<string>();
 
-async function withSpeechRequest(
-  provider: string, session: string | undefined, request: (signal: RequestInit["signal"]) => Promise<SpeechFile>,
-): Promise<SpeechFile> {
+async function withSpeechRequest<T>(
+  provider: string, session: string | undefined, request: (signal: RequestInit["signal"]) => Promise<T>,
+  consumerSignal?: AbortSignal,
+): Promise<T> {
   const controller = new AbortController();
   if (session) {
     const set = inFlight.get(session) ?? new Set();
@@ -56,13 +57,14 @@ async function withSpeechRequest(
     inFlight.set(session, set);
   }
   // The timeout aborts the request itself (and reading its body), rather than abandoning it.
-  const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]);
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const signal = AbortSignal.any([controller.signal, timeout, ...(consumerSignal ? [consumerSignal] : [])]);
   try {
     // This runs on Node; React Native also declares a global fetch with a different signal type.
     return await request(signal as RequestInit["signal"]);
   } catch (error) {
     if (controller.signal.aborted) throw new Cancelled();
-    if (signal.aborted) throw new Error(`${provider} TTS request timed out`);
+    if (timeout.aborted) throw new Error(`${provider} TTS request timed out`);
     throw error;
   } finally {
     const set = session ? inFlight.get(session) : undefined;
@@ -107,14 +109,31 @@ function openAiError(status: number, body: string): Error {
   return new Error(`OpenAI TTS request failed (${status})${detail ? ": " + detail : ""}`);
 }
 
-async function synthesizeElevenLabs(voice: ElevenLabsVoice, { text, session, previous, next }: SpeechRequest): Promise<SpeechFile> {
+export type ElevenLabsAudioFormat = "pcm_24000" | "mp3_44100_128" | "wav_24000";
+
+export class ElevenLabsSpeechError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+export async function requestElevenLabs(
+  voice: Pick<ElevenLabsVoice, "apiKey" | "voiceId" | "model" | "speed">,
+  { text, session, previous, next, format, fetchSpeech = fetch, signal: consumerSignal }:
+    Pick<SpeechRequest, "text" | "session" | "previous" | "next"> & {
+      format: ElevenLabsAudioFormat; fetchSpeech?: typeof fetch; signal?: AbortSignal;
+    },
+): Promise<ArrayBuffer> {
   const { apiKey, voiceId, model, speed } = voice;
-  if (!apiKey) throw new Error("No ElevenLabs API key is configured. " + ELEVENLABS_SETTINGS);
-  if (!voiceId) throw new Error("Choose an ElevenLabs voice. " + ELEVENLABS_SETTINGS);
-  const url = `${ELEVENLABS_API}/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=pcm_24000`;
+  if (!apiKey) throw new ElevenLabsSpeechError(400, "No ElevenLabs API key is configured. " + ELEVENLABS_SETTINGS);
+  if (!voiceId) throw new ElevenLabsSpeechError(400, "Choose an ElevenLabs voice. " + ELEVENLABS_SETTINGS);
+  const url = `${ELEVENLABS_API}/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=${format}`;
   const body = { text, model_id: model, voice_settings: { speed } };
   return withSpeechRequest("ElevenLabs", session, async (signal) => {
-    const request = (context: boolean) => fetch(url, {
+    const request = (context: boolean) => fetchSpeech(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", "xi-api-key": apiKey },
       body: JSON.stringify(context ? { ...body, previous_text: previous, next_text: next } : body),
@@ -128,13 +147,17 @@ async function synthesizeElevenLabs(voice: ElevenLabsVoice, { text, session, pre
         modelsWithoutContext.add(model);
         response = await request(false);
       } else {
-        throw elevenLabsError(response.status, detail, apiKey, true);
+        throw speechError(response.status, detail, apiKey);
       }
     }
-    if (!response.ok) throw elevenLabsError(response.status, await response.text().catch(() => ""), apiKey, true);
-    const pcm = await response.arrayBuffer().catch(() => { throw new Error("Could not read ElevenLabs audio"); });
-    return pcm16Clip(pcm);
-  });
+    if (!response.ok) throw speechError(response.status, await response.text().catch(() => ""), apiKey);
+    return response.arrayBuffer().catch(() => { throw new Error("Could not read ElevenLabs audio"); });
+  }, consumerSignal);
+}
+
+function speechError(status: number, detail: string, apiKey: string): ElevenLabsSpeechError {
+  return new ElevenLabsSpeechError(status === 401 || status === 429 ? status : 502,
+    elevenLabsError(status, detail, apiKey, true).message);
 }
 
 // ---------- Local voices ----------
@@ -364,7 +387,7 @@ export async function synthesize(input: SpeechRequest, settings?: VoiceSettings)
   if (localOnly && voice.provider !== "local") throw new Error("Only local voices can be prefetched");
   switch (voice.provider) {
     case "openai": return synthesizeOpenAi(voice, text, session);
-    case "elevenlabs": return synthesizeElevenLabs(voice, input);
+    case "elevenlabs": return pcm16Clip(await requestElevenLabs(voice, { ...input, format: "pcm_24000" }));
     case "local": return synthesizeLocal(voice, text, session);
   }
 }

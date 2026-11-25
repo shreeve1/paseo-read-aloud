@@ -1,0 +1,127 @@
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { z } from "zod";
+import type { VoiceSettings } from "../shared/settings";
+import { readKey } from "./elevenlabs-key";
+import { ElevenLabsSpeechError, requestElevenLabs, type ElevenLabsAudioFormat } from "./tts";
+
+const HOST = "127.0.0.1";
+export const BRIDGE_PORT = 8390;
+export const BRIDGE_URL = `http://${HOST}:${BRIDGE_PORT}/v1`;
+const MAX_BODY_BYTES = 64 * 1024;
+const CONTEXT_MS = 20_000;
+
+const speechInput = z.object({
+  input: z.string().refine((text) => Boolean(text.trim())),
+  response_format: z.enum(["pcm", "mp3", "wav"]).default("mp3"),
+});
+
+const formats = {
+  pcm: { format: "pcm_24000", contentType: "audio/pcm" },
+  mp3: { format: "mp3_44100_128", contentType: "audio/mpeg" },
+  wav: { format: "wav_24000", contentType: "audio/wav" },
+} satisfies Record<z.output<typeof speechInput>["response_format"], { format: ElevenLabsAudioFormat; contentType: string }>;
+
+function sendError(res: ServerResponse, status: number, message: string) {
+  if (res.destroyed) return;
+  const type = status === 401 ? "authentication_error" : status === 429 ? "rate_limit_error"
+    : status === 502 ? "server_error" : "invalid_request_error";
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: { message, type } }));
+}
+
+async function readBody(req: IncomingMessage, res: ServerResponse) {
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+    bytes += chunk.length;
+    if (bytes > MAX_BODY_BYTES) {
+      res.setHeader("Connection", "close");
+      throw new Error("Speech request exceeds 64 KiB.");
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks, bytes).toString("utf8");
+}
+
+export function startSpeechBridge({
+  getSettings, port = BRIDGE_PORT, fetchSpeech, env, now = Date.now,
+}: {
+  getSettings: () => Promise<VoiceSettings["elevenlabs"] | undefined>;
+  port?: number;
+  fetchSpeech?: typeof fetch;
+  env?: NodeJS.ProcessEnv;
+  now?: () => number;
+}) {
+  let last: { input: string; time: number } | undefined;
+  let error: string | undefined;
+  const lifetime = new AbortController();
+
+  async function speak(req: IncomingMessage, res: ServerResponse) {
+    if (req.url?.split("?")[0] !== "/v1/audio/speech") return sendError(res, 404, "Speech endpoint not found.");
+    if (req.method !== "POST") {
+      res.setHeader("Allow", "POST");
+      return sendError(res, 405, "Use POST to request speech.");
+    }
+    // A website must not be able to spend the local account's speech quota.
+    if (req.headers.origin !== undefined) return sendError(res, 403, "Browser requests are not allowed.");
+
+    let body: string;
+    try {
+      body = await readBody(req, res);
+    } catch {
+      return sendError(res, 400, "Could not read the speech request (limit: 64 KiB).");
+    }
+    let json: unknown;
+    try {
+      json = JSON.parse(body);
+    } catch {
+      return sendError(res, 400, "Expected a JSON speech request.");
+    }
+    const parsed = speechInput.safeParse(json);
+    if (!parsed.success) return sendError(res, 400, "Provide non-empty input and use pcm, mp3, or wav as response_format.");
+
+    const { input, response_format } = parsed.data;
+    const { format, contentType } = formats[response_format];
+    const settings = await getSettings();
+    const { apiKey } = readKey(env);
+    const time = now();
+    const previous = last && time - last.time < CONTEXT_MS ? last.input : undefined;
+    last = { input, time };
+    const consumer = new AbortController();
+    res.once("close", () => consumer.abort());
+    if (res.destroyed) return;
+    const audio = await requestElevenLabs({
+      apiKey, voiceId: settings?.voiceId ?? "", model: settings?.model ?? "", speed: settings?.speed ?? 1,
+    }, { text: input, previous, format, fetchSpeech, signal: consumer.signal });
+    res.writeHead(200, { "Content-Type": contentType });
+    res.end(Buffer.from(audio));
+  }
+
+  const server = createServer((req, res) => {
+    void speak(req, res).catch((cause: unknown) => {
+      if (cause instanceof ElevenLabsSpeechError && cause.status !== 502) {
+        return sendError(res, cause.status, cause.message);
+      }
+      sendError(res, 502, "Could not generate speech with ElevenLabs.");
+    });
+  });
+  server.on("error", (cause: NodeJS.ErrnoException) => {
+    if (error) return;
+    error = `Read Aloud could not listen on ${HOST}:${port} (${cause.code ?? "unknown error"}).`;
+    console.warn(error);
+  });
+  server.listen({ port, host: HOST, signal: lifetime.signal });
+
+  return {
+    status: () => ({ listening: server.listening, error }),
+    port: () => {
+      const address = server.address();
+      return typeof address === "object" ? address?.port : undefined;
+    },
+    close: () => new Promise<void>((resolve) => {
+      lifetime.abort();
+      server.close(() => resolve());
+      server.closeAllConnections();
+    }),
+  };
+}
