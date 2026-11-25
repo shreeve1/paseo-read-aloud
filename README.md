@@ -1,30 +1,46 @@
 # Read Aloud for Paseo
 
 A [Paseo](https://paseo.sh) plugin that adds a speaker button under each finished agent reply.
-Press it to hear the reply; press again to stop. It speaks with whatever voice Paseo's own voice
-mode uses: a local voice Paseo has downloaded (Kokoro, Kitten, Piper) or OpenAI TTS.
+Press it to hear the reply. Press again to stop. Read Aloud can use an ElevenLabs voice or follow
+Paseo's own voice settings for local speech or OpenAI.
 
 ![Read Aloud button under a reply](assets/screenshot.png)
 
 ## Install
 
+Use this checkout with Paseo 0.17.0 or later:
+
 ```sh
-paseo plugin add average-crumb/read-aloud
+paseo plugin add /absolute/path/to/paseo-read-aloud
 ```
 
-For local speech, download a voice first in Paseo **Settings > Voice**. The plugin has no
-settings of its own. See [OVERVIEW.md](OVERVIEW.md) for how it works, what data it touches and its
-limits.
+## Choose a voice
+
+Open **Settings > Plugins** and select the cog next to **Read Aloud**.
+
+- To follow Paseo, leave **Voice source** set to **Paseo voice settings**. For local speech, download
+  a voice in **Settings > Voice** first.
+- To use ElevenLabs, select **ElevenLabs**. Enter an API key with access to voice lookup and
+  text to speech, then select **Save**. If the Paseo daemon already has an `ELEVENLABS_API_KEY`
+  environment variable, Read Aloud uses that key. Pick a voice and select **Play** under **Test voice**.
+- To give agents different voices, turn on the voices you want under **Voices for other agents**.
+  Each agent gets a consistent voice while that list stays the same.
+- To hear new replies without pressing the button, turn on **Read new replies automatically**.
+  This setting applies only to this device and only to open chats.
+
+Read Aloud saves the ElevenLabs key on the daemon host in
+`<paseo-home>/plugin-data/read-aloud/elevenlabs-key`. See [the overview](OVERVIEW.md#data) for which
+providers receive reply text.
 
 ## Layout
 
 | Path | What it does |
 | --- | --- |
-| `index.server.ts`, `server/` | Adds the button row after each turn; generates speech (local sherpa-onnx or OpenAI) |
-| `index.client.tsx`, `client/` | The button, and the player that queues clips gaplessly |
-| `shared/speech.ts` | RPC contracts between client and server |
+| `index.server.ts`, `server/` | Adds reply rows, stores the ElevenLabs key, and generates speech |
+| `index.client.tsx`, `client/` | Settings screen, reply button, and playback |
+| `shared/` | Settings and request shapes shared by the client and daemon |
 | `shared/text.ts` | Markdown-to-speech cleanup and chunking (no dependencies) |
-| `test/` | Tests for the text handling and the player, run against a fake Paseo |
+| `test/` | Tests for text, playback, settings, and cloud requests with fake responses |
 
 ## Develop
 
@@ -32,11 +48,9 @@ limits.
 npm install
 npm run typecheck
 npm test
-paseo plugin add /absolute/path/to/paseo-read-aloud
 ```
 
-Requires Paseo 0.15.4 or later. Tests need Node 22.6+ (they use Node's built-in TypeScript
-support and test runner).
+Tests use Node's built-in TypeScript support and do not need an API key.
 
 ## License
 
