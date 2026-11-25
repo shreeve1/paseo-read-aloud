@@ -1,0 +1,95 @@
+{
+  "protocol": "testytech-client-speech",
+  "version": 1,
+  "transport": {
+    "scheme": "https",
+    "hub_dns_name_label": "services.client-cliproxy.dns_name",
+    "hub_port_label": "services.client-speech.port",
+    "tls": "Client trusts only the managed CA file and verifies the hub DNS name; no system roots, no redirects, no proxies.",
+    "auth_header": "Authorization: Bearer <hosted login credential>",
+    "bearer_pattern": "^[A-Za-z0-9._-]{24,512}$"
+  },
+  "client_files": {
+    "managed_config": "/etc/paseo-read-aloud/managed.json",
+    "managed_config_shape": {"version": 1, "origin": "https://<hub dns name>:<speech port>"},
+    "ca_file": "/etc/paseo-read-aloud/hub-ca.pem",
+    "credential_helper": "/usr/local/libexec/paseo-read-aloud/hub-credential",
+    "credential_helper_contract": "No arguments. Runs as the Paseo login. Reads model_providers.clientproxy.experimental_bearer_token from ~/.codex/config.toml. Exit 0 with exactly the bearer and one newline on stdout; any failure exits nonzero with nothing on stdout.",
+    "ownership": "All three are owned by root and not writable by group or other. The plugin refuses managed mode files that fail this check and stays in managed mode, unavailable."
+  },
+  "routes": {
+    "voices": {
+      "method": "GET",
+      "path": "/v1/speech/voices",
+      "request_body": "none",
+      "response_200": {
+        "content_type": "application/json",
+        "shape": {"voices": [{"id": "string", "name": "string"}]},
+        "max_bytes": 65536
+      }
+    },
+    "synthesize": {
+      "method": "POST",
+      "path": "/v1/speech/synthesize",
+      "request_content_type": "application/json",
+      "request_shape": {"voice_id": "string", "text": "string"},
+      "request_rules": "Exactly these two keys. Any other key, including previous_text, next_text or model, is rejected as bad_request with no vendor call.",
+      "response_200": {
+        "content_type": "application/octet-stream",
+        "audio_format_header": "X-Audio-Format: pcm_s16le_24000_mono",
+        "body": "Raw signed 16-bit little-endian mono PCM at 24000 Hz, even length, at least 1 byte.",
+        "max_bytes": 1048576
+      }
+    }
+  },
+  "errors": {
+    "content_type": "application/json",
+    "shape": {"error": {"code": "string", "message": "string"}},
+    "codes": {
+      "bad_request": 400,
+      "unauthorized": 401,
+      "not_granted": 403,
+      "voice_not_allowed": 403,
+      "text_not_allowed": 403,
+      "not_found": 404,
+      "too_large": 413,
+      "quota_exceeded": 429,
+      "rate_limited": 429,
+      "busy": 503,
+      "auth_unavailable": 503,
+      "vendor_error": 502
+    },
+    "client_rule": "Any non-200, unknown code, wrong content type, missing audio header or oversize body is a failure the client explains; it never falls back to a direct vendor call."
+  },
+  "pilot": {
+    "fixture_only": true,
+    "fixture_text": "The blue notebook is on the shelf.",
+    "fixture_rule": "In fixture_only mode the hub accepts text equal to fixture_text byte for byte and nothing else.",
+    "automatic_reading": false,
+    "test_voice_action": false
+  },
+  "limits": {
+    "max_request_bytes": 4096,
+    "max_text_chars": 500,
+    "per_login_requests_per_minute": 6,
+    "per_login_concurrency": 1,
+    "hub_concurrency": 4,
+    "identity_map_max_age_seconds": 120,
+    "cliproxy_check_timeout_seconds": 3,
+    "vendor_timeout_seconds": 20
+  },
+  "hub_order_of_checks": [
+    "parse and size-check the request; unknown route is not_found",
+    "bearer present and matches bearer_pattern, else unauthorized",
+    "identity map fresh (age <= identity_map_max_age_seconds), else auth_unavailable",
+    "bearer fingerprint maps to an active identity, else unauthorized",
+    "policy grant for that identity exists and is enabled, else not_granted",
+    "per-login rate and concurrency and hub concurrency, else rate_limited or busy",
+    "bounded GET /v1/models on the private CLIProxy with the same bearer returns 200, else unauthorized on 401/403 and auth_unavailable otherwise",
+    "voices: return policy voices allowed for the grant (no vendor call)",
+    "synthesize: voice_id allowed for the grant, else voice_not_allowed",
+    "synthesize: text passes the fixture rule, else text_not_allowed",
+    "synthesize: reserve len(text) characters against login and company monthly limits in one transaction, else quota_exceeded",
+    "synthesize: one vendor call with the hub's vendor key; failure is vendor_error and the reservation stays counted"
+  ]
+}
