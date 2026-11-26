@@ -2,7 +2,7 @@
 
 A [Paseo](https://paseo.sh) plugin that adds a speaker button under each finished agent reply.
 Press it to hear the reply. Press again to stop. On a managed host, choose a Central voice or
-use Paseo's local voice. On a personal install, use ElevenLabs directly or follow Paseo's voice settings.
+use Paseo's local voice. On a personal install, choose Google Chirp 3 HD or follow Paseo's voice settings.
 
 ![Read Aloud button under a reply](assets/screenshot.png)
 
@@ -20,22 +20,34 @@ On a personal install, open **Settings > Plugins** and select the cog next to **
 
 - To follow Paseo, leave **Voice source** set to **Paseo voice settings**. For local speech, download
   a voice in **Settings > Voice** first.
-- To use ElevenLabs, select **ElevenLabs**. Enter an API key with access to voice lookup and
-  text to speech, then select **Save**. If the Paseo daemon already has an `ELEVENLABS_API_KEY`
-  environment variable, Read Aloud uses that key. Pick a voice and select **Play** under **Test voice**.
-- To give agents different voices, turn on the voices you want under **Voices for other agents**.
+- To use Google Cloud Text-to-Speech, select **Google** and [set up a key](#set-up-google).
+- To give agents different voices, add them under **Voices for other agents**.
   Each agent gets a consistent voice while that list stays the same.
 - To hear new replies without pressing the button, turn on **Read new replies automatically**.
   This setting applies only to this device and only to open chats.
 
-Read Aloud saves the ElevenLabs key on the daemon host in
-`<paseo-home>/plugin-data/read-aloud/elevenlabs-key`. See [the overview](OVERVIEW.md#data) for which
-providers receive reply text.
+## Set up Google
+
+1. In the Google Cloud console, select a project with billing enabled.
+2. Under **APIs & Services**, enable the **Cloud Text-to-Speech API**.
+3. Under **Credentials**, choose **Create credentials > API key**. Restrict the key to the
+   **Cloud Text-to-Speech API**.
+4. In Read Aloud settings, paste the key and select **Save**. Choose a voice, then select
+   **Play** under **Test voice**.
+
+Read Aloud saves the key on the daemon host in `<paseo-home>/plugin-data/read-aloud/google-key`.
+Set `GOOGLE_TTS_API_KEY` in the daemon environment to override the saved key.
+Google includes the first 1 million Chirp 3 HD characters per month at no charge, then
+[charges US$30 per million characters](https://cloud.google.com/text-to-speech/pricing).
+Read Aloud sends the cleaned reply text to Google. See [Data in the overview](OVERVIEW.md#data).
+
+If you upgrade from the previous direct voice provider, Read Aloud selects Google and resets
+the voice and speed to Google's defaults. Set up a Google key before using direct speech again.
 
 ## Central voice on a managed host
 
 Open **Settings > Plugins > Read Aloud**. Select **Central voice** and choose an approved voice.
-You don't need an ElevenLabs key. If the service rejects your selected voice or **Refresh** finds
+You don't need a Google key. If the service rejects your selected voice or **Refresh** finds
 that it was removed, the picker clears it. If Central voice can't play, select **Paseo voice
 settings (local)** and use a downloaded voice from **Settings > Voice**.
 
@@ -51,7 +63,7 @@ for the required host files and credential helper.
 
 ## Voice mode on a personal install
 
-With **ElevenLabs** selected, turn on **Use this voice in Voice mode** to hear Paseo Voice mode
+With **Google** selected, turn on **Use this voice in Voice mode** to hear Paseo Voice mode
 replies in your main Read Aloud voice. The switch changes Paseo's **Speaking** provider to
 **OpenAI** and points its **Base URL** at the speech bridge on the daemon host. Each Linux user
 gets a port based on their user ID. If the port is in use, set `READ_ALOUD_BRIDGE_PORT` in that
@@ -59,7 +71,7 @@ daemon's environment to an unused port from 1024 to 65535 before starting it.
 
 The bridge listens only on the daemon host. It accepts speech requests only when they carry
 your Paseo **Speaking** key. The switch keeps an existing OpenAI key or creates a private key
-when needed. The bridge sends the speech text to ElevenLabs. Listening settings stay the same.
+when needed. The bridge sends the speech text to Google. Listening settings stay the same.
 Turn the switch on again after upgrading from 0.4.0 or changing the port.
 
 Turn the switch off before disabling Read Aloud. It clears the Base URL if you started with

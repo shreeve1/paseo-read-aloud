@@ -2,7 +2,7 @@
   "id": "read-aloud",
   "name": "Read Aloud",
   "icon": "assets/icon.png",
-  "description": "Reads assistant replies with an ElevenLabs voice or the local or OpenAI voice selected in Paseo.",
+  "description": "Reads assistant replies with Google Chirp 3 HD, an approved Central voice, or the local or OpenAI voice selected in Paseo.",
   "requirements": {
     "paseo": ">=0.17.0"
   },

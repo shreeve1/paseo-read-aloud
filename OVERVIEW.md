@@ -20,9 +20,10 @@ Read Aloud prepares and plays short clips:
 - Local voices are loaded when a chat opens. On personal installs, Read Aloud
   prepares the first local clip when you touch the button or hover over it
   on desktop.
-- Read Aloud trims padding silence from WAV clips and queues the next clip
-  shortly before the current clip ends. OpenAI-compatible endpoints that reject
-  raw audio fall back to MP3, where a short gap can remain.
+- Read Aloud trims padding silence from local and raw audio clips. For WAV
+  playback, it queues the next clip shortly before the current clip ends.
+  OpenAI-compatible endpoints that reject raw audio fall back to MP3, where a
+  short gap can remain.
 - Stopping drops any parts still waiting to be prepared, so the next press
   isn't held up behind them.
 
@@ -37,8 +38,8 @@ Paseo's Voice mode. Read Aloud checks the voice environment variables, then
 - OpenAI: the configured OpenAI-compatible speech endpoint, key, model and
   voice.
 
-When **Voice source** is **ElevenLabs**, Read Aloud uses your selected account
-voice, model, and speed. If you add voices under **Voices for other agents**,
+When **Voice source** is **Google**, Read Aloud uses your selected Chirp 3 HD
+voice and speed. If you add voices under **Voices for other agents**,
 each agent gets a consistent voice from the main voice and your selections.
 Changing the list can change which voice an agent gets. **Test voice** uses
 the main voice.
@@ -72,10 +73,15 @@ See the [hub protocol](shared/hub-protocol-v1.json) for paths and formats.
 
 ## Personal setup
 
-Open **Settings > Plugins** and select the cog next to **Read Aloud**. To use
-ElevenLabs, select that source, save an API key, and choose a voice. A daemon
-environment key takes priority over a saved key. For local speech, download the
-selected voice in **Settings > Voice**.
+Open **Settings > Plugins** and select the cog next to **Read Aloud**.
+For local speech, download the selected voice in **Settings > Voice**.
+
+To use Google, select a Google Cloud project with billing enabled. In
+**APIs & Services**, enable the **Cloud Text-to-Speech API**. Under
+**Credentials**, create an API key and restrict it to that API. Select
+**Google** in Read Aloud settings, save the key, and choose a voice.
+Google includes the first 1 million Chirp 3 HD characters per month at no
+charge, then [charges US$30 per million characters](https://cloud.google.com/text-to-speech/pricing).
 
 **Read new replies automatically** is off by default. Turn it on for each device
 where you want it. It reads replies that appear in open chats within 20 seconds
@@ -85,13 +91,13 @@ speaker button yourself.
 
 ## Voice mode on a personal install
 
-With **ElevenLabs** selected, turn on **Use this voice in Voice mode** to hear
+With **Google** selected, turn on **Use this voice in Voice mode** to hear
 Paseo Voice mode replies in your main Read Aloud voice. The switch sets
 Paseo's **Speaking** provider to **OpenAI** and points its **Base URL** at
 the speech bridge. Each Linux user gets a port based on their user ID.
 The bridge listens only on the daemon host and accepts requests only when
 they carry your Paseo **Speaking** key. It sends Voice mode speech text
-to ElevenLabs.
+to Google.
 
 Turn the switch off before disabling the plugin. This clears the Base URL
 or restores the Local provider if you were using it before. If you disable
@@ -104,21 +110,19 @@ Local speech generates audio on the daemon host and sends the finished audio to
 the client for playback. For Central voice, the daemon verifies the private hub's
 certificate and host name before sending the existing hosted login credential
 and the current text chunk. Adjacent chunks stay on the daemon. The plugin does
-not store another copy of the credential, start a speech bridge, or send requests
-directly to ElevenLabs. The hub holds the ElevenLabs key and enforces the pilot's
-synthetic text restriction.
+not store another copy of the credential, start a speech bridge, or call a
+speech provider directly. The hub handles provider credentials and enforces
+the pilot's synthetic text restriction.
 
-On a personal install, OpenAI and ElevenLabs receive the cleaned reply text
-in short chunks. ElevenLabs also receives the text of adjacent chunks to help
-keep the delivery consistent. If a model rejects that extra text, Read Aloud
-retries without it. Cloud requests can start when you press the speaker button,
+On a personal install, OpenAI and Google receive the cleaned reply text
+in short chunks. Cloud requests can start when you press the speaker button,
 test a voice, or enable automatic reading and a new reply arrives. Touching
 without pressing or hovering only prepares audio for local voices.
 
-The plugin sends the ElevenLabs key to ElevenLabs to validate it, list account
-voices, and generate speech. It does not send the saved key back to connected
-clients. The key comes from the daemon's `ELEVENLABS_API_KEY` environment variable
-or lives in `<paseo-home>/plugin-data/read-aloud/elevenlabs-key`. On systems that
+The plugin sends the Google key to Google to validate it, list voices, and
+generate speech. It does not send the saved key back to connected clients.
+The daemon's `GOOGLE_TTS_API_KEY` environment variable takes priority over
+`<paseo-home>/plugin-data/read-aloud/google-key`. On systems that
 support Unix permissions, the directory is private to the daemon user
 (`0700`) and the key file is readable and writable only by that user (`0600`).
 Other voice settings are shared by clients connected to that host. The auto-read
