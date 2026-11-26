@@ -313,23 +313,27 @@ export function createVoiceSettingsScreen(client: PluginClientContext) {
     const state = useSyncExternalStore(preview.subscribe, preview.getSnapshot, preview.getSnapshot);
     const testing = state.status === "playing";
 
-    function testAction(mode: "managed" | "personal", disabled: boolean) {
+    function testAction(mode: "managed" | "standard" | "local" | "personal", disabled: boolean) {
+      const central = mode === "managed" || mode === "standard";
       return <SettingsAction label="Test voice" actionLabel={testing ? "Testing..." : "Play"}
         disabled={disabled || testing}
-        hint={mode === "managed" ? `Plays “${protocol.pilot.fixture_text}”` : undefined}
+        hint={central ? `Plays “${protocol.pilot.fixture_text}”` : undefined}
         error={state.status === "error" ? state.message : undefined}
         onPress={async () => {
           if (disabled) return;
           const result = await preview.play({ mode, speak, playAudio: (audio) => client.playAudio(audio) });
-          if (result === "failed" && mode === "managed") {
+          if (result === "failed" && central) {
             void queryClient.invalidateQueries({ queryKey: [...voiceStatusQueryKey, host.id] });
           }
         }} />;
     }
 
     const personal = status?.mode === "personal";
-    const provider = settings.status === "ready" ? settings.values.provider : undefined;
-    const options = status ? voiceSources(status.mode) : [];
+    const standard = status?.mode === "managed" && status.standard === true;
+    const local = status?.mode === "managed-local";
+    const savedProvider = settings.status === "ready" ? settings.values.provider : undefined;
+    const provider = local || (standard && savedProvider === "google") ? "paseo" : savedProvider;
+    const options = status ? voiceSources(status.mode, standard) : [];
     const selected = options.some(({ value }) => value === provider) ? provider : undefined;
     const google = personal && settings.status === "ready" && settings.values.provider === "google";
 
@@ -351,6 +355,10 @@ export function createVoiceSettingsScreen(client: PluginClientContext) {
                   preview.reset();
                   void settings.save({ ...settings.values, provider }, settings.revision);
                 }} />
+              {standard && provider === "managed" ? (
+                <Message theme={theme} text="Pressing the speaker on a reply sends the reply text to Google to make audio. Test voice sends only the fixed sample." />
+              ) : null}
+              {local && status.reason ? <Message theme={theme} text={status.reason} error /> : null}
               {!selected && provider === "google" ? <Message theme={theme} text={DIRECT_VOICE_UNAVAILABLE} /> : null}
               {!selected && provider === "managed" ? (
                 <Message theme={theme} text="Central voice is unavailable on this host. Choose a voice source above." />
@@ -375,19 +383,19 @@ export function createVoiceSettingsScreen(client: PluginClientContext) {
           <Message theme={theme} text={status.speakingProblem} error />
         ) : null}
         {google ? <GoogleControls settings={settings} theme={theme} testAction={testAction("personal", settings.saving)} /> : null}
-        {status && status.mode !== "personal" && settings.status === "ready" && provider === "managed" ? (
+        {status && (status.mode === "managed" || status.mode === "managed-unavailable") && settings.status === "ready" && provider === "managed" ? (
           status.mode === "managed" ? (
             <ManagedVoiceControls hostId={host.id} settings={settings} theme={theme} speedProblem={status.speedProblem}
-              testing={testing} testAction={(disabled) => testAction("managed", disabled)} resetTest={preview.reset} />
+              testing={testing} testAction={(disabled) => testAction(standard ? "standard" : "managed", disabled)} resetTest={preview.reset} />
           ) : (
             <SettingsSection title="Google Chirp 3 HD via Central voice">
               <Message theme={theme} text={status.reason} error />
             </SettingsSection>
           )
         ) : null}
-        {personal && settings.status === "ready" && provider === "paseo" ? (
+        {(personal || local || standard) && settings.status === "ready" && provider === "paseo" ? (
           <SettingsSection title="Preview">
-            <SettingsCard>{testAction("personal", settings.saving)}</SettingsCard>
+            <SettingsCard>{testAction(personal ? "personal" : "local", settings.saving)}</SettingsCard>
           </SettingsSection>
         ) : null}
         {personal ? <DeviceControls theme={theme} /> : null}

@@ -10,6 +10,8 @@
     "bearer_pattern": "^[A-Za-z0-9._-]{24,512}$"
   },
   "client_files": {
+    "standard_profiles_label": "paths.client-read-aloud.profiles",
+    "standard_profiles": "/etc/paseo-read-aloud/profiles",
     "managed_config": "/etc/paseo-read-aloud/managed.json",
     "managed_config_shape": {"version": 1, "origin": "https://<hub dns name>:<speech port>"},
     "ca_file": "/etc/paseo-read-aloud/hub-ca.pem",
@@ -24,7 +26,7 @@
       "request_body": "none",
       "response_200": {
         "content_type": "application/json",
-        "shape": {"voices": [{"id": "string", "name": "string"}]},
+        "shape": {"voices": [{"id": "string", "name": "string"}], "reply_mode": "pilot | standard (optional for legacy hubs)"},
         "max_bytes": 65536
       }
     },

@@ -1,3 +1,6 @@
+import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
+import type { centralChunk, endCentral, startCentral } from "../shared/managed";
+import { centralChunks } from "./central-chunks";
 import { toChunks, toSpeech } from "../shared/text";
 import type { SpeechFile, SpeechRequest } from "../shared/speech";
 
@@ -9,16 +12,21 @@ import type { SpeechFile, SpeechRequest } from "../shared/speech";
  * and reading should carry on (and show the right button when the row comes back).
  */
 
-export type Phase = "idle" | "loading" | "playing" | "stopping";
+export type Phase = "idle" | "loading" | "playing" | "waiting" | "stopping";
 export type AudioData = SpeechFile;
 
 export interface PlayerHost {
   /** Generates one chunk. `session` groups one press's chunks so they can be cancelled together. */
   speak(input: SpeechRequest & { session: string }): Promise<AudioData>;
-  /** Drops a session's queued chunks on the host. */
+  /** Drops a personal or local session's queued chunks on the host. */
   cancel(session: string): Promise<unknown>;
   /** Paseo's shared audio queue: resolves when the clip finishes, cannot be interrupted. */
   playAudio(audio: AudioData): Promise<void>;
+  central?: {
+    start(input: RpcInput<typeof startCentral>): Promise<RpcOutput<typeof startCentral>>;
+    chunk(input: RpcInput<typeof centralChunk>): Promise<RpcOutput<typeof centralChunk>>;
+    end(input: RpcInput<typeof endCentral>): Promise<unknown>;
+  };
 }
 
 export const PLAYER_DEFAULTS = {
@@ -28,10 +36,32 @@ export const PLAYER_DEFAULTS = {
   handoffMs: 250,
 };
 
-type Run = { key: string; session: string; stopped: boolean };
+type Run = { key: string; session: string; stop: AbortController; cancel: () => void };
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, ms)));
 const newSession = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+function untilStop<T>(signal: AbortSignal, work: Promise<T>): Promise<T | undefined> {
+  return new Promise((resolve, reject) => {
+    const stopped = () => resolve(undefined);
+    if (signal.aborted) stopped();
+    else signal.addEventListener("abort", stopped, { once: true });
+    void work.then(resolve, reject).finally(() => signal.removeEventListener("abort", stopped));
+  });
+}
+
+function waitForRetry(signal: AbortSignal, seconds: number) {
+  return new Promise<void>((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, seconds * 1000);
+    if (signal.aborted) finish();
+    else signal.addEventListener("abort", finish, { once: true });
+  });
+}
+
 const AUTO_READ_WINDOW_MS = 20_000;
 const autoPlayed = new Set<string>();
 
@@ -52,10 +82,9 @@ export function createPlayer(host: PlayerHost, options = PLAYER_DEFAULTS) {
   }
 
   function stopRun(run: Run) {
-    if (run.stopped) return;
-    run.stopped = true;
-    // Drop the chunks still waiting on the host so the next press starts straight away.
-    host.cancel(run.session).catch(() => undefined);
+    if (run.stop.signal.aborted) return;
+    run.stop.abort();
+    run.cancel();
     if (current?.run === run) setPhase(run, "stopping");
   }
 
@@ -77,7 +106,13 @@ export function createPlayer(host: PlayerHost, options = PLAYER_DEFAULTS) {
     const cached = usePrefetch ? warm.get(key) : undefined;
     warm.delete(key);
     // Each press gets its own run: a stopped press can never be revived by the next one.
-    const run: Run = { key, session: cached?.session ?? newSession(), stopped: false };
+    const session = cached?.session ?? newSession();
+    const run: Run = {
+      key,
+      session,
+      stop: new AbortController(),
+      cancel: () => { void host.cancel(session).catch(() => undefined); },
+    };
     current = { run, phase: "loading" };
     setPhase(run, "loading");
 
@@ -102,9 +137,9 @@ export function createPlayer(host: PlayerHost, options = PLAYER_DEFAULTS) {
       for (let index = 0; index < chunks.length; index++) {
         for (let ahead = 0; ahead <= options.lookahead; ahead++) request(index + ahead);
         const audio = await pending[index];
-        if (run.stopped) break;
+        if (run.stop.signal.aborted) break;
         await handoff;
-        if (run.stopped) break;
+        if (run.stop.signal.aborted) break;
         setPhase(run, "playing");
         const started = queued;
         const done = host.playAudio(audio).catch(() => {
@@ -118,16 +153,86 @@ export function createPlayer(host: PlayerHost, options = PLAYER_DEFAULTS) {
         handoff = duration === undefined ? done : Promise.race([done, started.then(() => delay(duration - options.handoffMs))]);
       }
     } catch (error) {
-      if (!run.stopped) onError(error);
+      if (!run.stop.signal.aborted) onError(error);
     } finally {
       // Show "stopping" until the clip already in Paseo's queue has actually finished.
       await queued;
-      run.stopped = true;
+      run.stop.abort();
+      setPhase(run, "idle");
+    }
+  }
+
+  async function playCentral(key: string, text: string, onError: (error: unknown) => void) {
+    const central = host.central;
+    if (!central) return;
+    const cleaned = toSpeech(text);
+    if (!/[\p{L}\p{N}]/u.test(cleaned)) return;
+    if (current) stopRun(current.run);
+    const session = newSession();
+    let permit: string | undefined;
+    const release = () => {
+      if (!permit) return;
+      void central.end({ session, permit }).catch(() => undefined);
+      permit = undefined;
+    };
+    const run: Run = { key, session, stop: new AbortController(), cancel: release };
+    const { signal } = run.stop;
+    current = { run, phase: "loading" };
+    setPhase(run, "loading");
+    let playing: Promise<void> | undefined;
+
+    async function withRetry<T extends { kind: "ready" | "audio" }>(
+      request: () => Promise<T | { kind: "wait"; seconds: number; message: string }>,
+    ): Promise<T | undefined> {
+      setPhase(run, playing ? "playing" : "loading");
+      for (let attempt = 0; attempt < 2 && !signal.aborted; attempt++) {
+        const result = await untilStop(signal, request());
+        if (!result || signal.aborted) return;
+        if (result.kind !== "wait") return result;
+        if (attempt === 1) throw new Error(result.message);
+        setPhase(run, "waiting");
+        await waitForRetry(signal, result.seconds);
+        if (!signal.aborted) setPhase(run, playing ? "playing" : "loading");
+      }
+    }
+
+    try {
+      const authorized = await withRetry(async () => {
+        const result = await central.start({ session });
+        if (result.kind === "ready") {
+          // Stop can win the race before the daemon issues a permit.
+          if (signal.aborted) void central.end({ session, permit: result.permit }).catch(() => undefined);
+          else permit = result.permit;
+        }
+        return result;
+      });
+      if (!authorized) return;
+      const press = { session, permit: authorized.permit };
+      for (const [index, chunk] of centralChunks(cleaned, authorized.voiceId).entries()) {
+        const result = await withRetry(() => central.chunk({ ...press, index, text: chunk }));
+        if (!result || signal.aborted) break;
+        await playing;
+        if (signal.aborted) break;
+        setPhase(run, "playing");
+        const clip = host.playAudio(result.audio).catch((error: unknown) => {
+          if (!signal.aborted) onError(error);
+          stopRun(run);
+        });
+        playing = clip;
+        void clip.then(() => { if (playing === clip) playing = undefined; });
+      }
+    } catch (error) {
+      if (!signal.aborted) onError(error);
+    } finally {
+      release();
+      await playing;
+      run.stop.abort();
       setPhase(run, "idle");
     }
   }
 
   return {
+    playCentral,
     play(key: string, text: string, onError: (error: unknown) => void, agentId?: string, usePrefetch = true) {
       return play(key, text, onError, agentId, usePrefetch, { manual: true });
     },

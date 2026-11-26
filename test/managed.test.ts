@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { chmodSync, copyFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { chmodSync, copyFileSync, mkdirSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { HubError, loadMode } from "../server/managed";
 import protocol from "../shared/hub-protocol-v1.json" with { type: "json" };
@@ -160,4 +160,76 @@ test("bad helper output, nonzero exit and timeout do not start an HTTP request",
     });
   }
   assert.deepEqual(requests, []);
+});
+
+test("per-login standard markers isolate Local and Central from the legacy profile", async (t) => {
+  const { files, origin, requests, ownerUid } = await mockHub(t, (_request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" }).end('{"voices":[],"reply_mode":"standard"}');
+  });
+  const directory = join(dirname(files.config), "profiles");
+  const local = join(directory, "local_login");
+  const enrolled = join(directory, "central_login");
+  const lookup = (login: string) => loadMode(files, ownerUid, { directory, login: () => login });
+  mkdirSync(local, { recursive: true, mode: 0o755 });
+  mkdirSync(enrolled, { mode: 0o755 });
+  const localMarker = join(local, "managed.json");
+  const centralMarker = join(enrolled, "managed.json");
+  const central = { version: 1, mode: "central", origin };
+  const writeLocal = (path: string) => writeFileSync(path, JSON.stringify({ version: 1, mode: "local" }), { mode: 0o644 });
+  writeLocal(localMarker);
+  writeFileSync(centralMarker, JSON.stringify(central), { mode: 0o644 });
+  copyFileSync(files.ca, join(enrolled, "hub-ca.pem"));
+  copyFileSync(files.helper, join(enrolled, "hub-credential"));
+
+  assert.deepEqual(lookup("local_login"), { kind: "managed-local" });
+  const legacy = lookup("existing_login");
+  assert.equal(legacy.kind, "managed");
+  assert.equal(legacy.standard, undefined);
+  const standard = lookup("central_login");
+  assert.equal(standard.kind, "managed");
+  assert.equal(standard.standard, true);
+  assert.deepEqual(await standard.hub.voices(), { voices: [], reply_mode: "standard" });
+  assert.equal(requests.length, 1);
+
+  writeLocal(centralMarker + ".next");
+  renameSync(centralMarker + ".next", centralMarker);
+  assert.deepEqual(lookup("central_login"), { kind: "managed-local" });
+  assert.equal(lookup("existing_login").kind, "managed");
+
+  for (const unsafe of [directory, enrolled]) {
+    chmodSync(unsafe, 0o775);
+    const mode = lookup("central_login");
+    assert.equal(mode.kind, "managed-local");
+    assert.match(mode.reason ?? "", /could not be trusted/);
+    chmodSync(unsafe, 0o755);
+  }
+  renameSync(localMarker, localMarker + ".old");
+  symlinkSync(resolve(localMarker + ".old"), localMarker);
+  symlinkSync(resolve(enrolled), join(directory, "impostor"));
+  for (const login of ["local_login", "impostor", "../../legacy", "A"]) {
+    const mode = lookup(login);
+    assert.equal(mode.kind, "managed-local");
+    assert.match(mode.reason ?? "", /could not be trusted/);
+  }
+});
+
+test("only a typed rate denial with one bounded integer header may be retried", async (t) => {
+  let seconds: string | string[] = "";
+  let errorCode = "rate_limited";
+  const { hub } = await mockHub(t, (_request, response) => {
+    response.writeHead(429, { "Content-Type": "application/json", "Retry-After": seconds })
+      .end(JSON.stringify({ error: { code: errorCode, message: "Limit" } }));
+  });
+  for (const header of ["1", "60", "0", "-1", "61", "2.5", ["2", "3"]]) {
+    seconds = header;
+    await assert.rejects(hub.voices(), (error: unknown) => {
+      assert.ok(error instanceof HubError);
+      assert.equal(error.code, "rate_limited");
+      assert.equal(error.retryAfterSeconds, header === "1" || header === "60" ? Number(header) : undefined);
+      return true;
+    });
+  }
+  errorCode = "quota_exceeded";
+  seconds = "1";
+  await assert.rejects(hub.voices(), { code: "quota_exceeded", retryAfterSeconds: undefined });
 });

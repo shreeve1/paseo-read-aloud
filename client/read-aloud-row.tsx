@@ -1,9 +1,10 @@
 import type { PluginClientContext, PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { useSettings } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/ui";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ComponentProps } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { z } from "zod";
+import { centralChunk, endCentral, startCentral } from "../shared/managed";
 import { deviceSettings } from "../shared/settings";
 import { cancelSpeech, readAloudSchema, synthesizeSpeech } from "../shared/speech";
 import { createPlayer, type Phase, type Player } from "./player";
@@ -24,6 +25,11 @@ export function createReadAloudRow(client: PluginClientContext) {
     speak: (input) => client.rpc(synthesizeSpeech, input),
     cancel: (session) => client.rpc(cancelSpeech, { session }),
     playAudio: (audio) => client.playAudio(audio),
+    central: {
+      start: (input) => client.rpc(startCentral, input),
+      chunk: (input) => client.rpc(centralChunk, input),
+      end: (input) => client.rpc(endCentral, input),
+    },
   });
 
   return function ReadAloudRow({ agentId, host, item, timestamp, theme }: Props) {
@@ -65,37 +71,38 @@ export function createReadAloudRow(client: PluginClientContext) {
       });
     }
 
-    const label = broken
-      ? "Read aloud unavailable. Show how to fix it"
-      : phase === "stopping"
-        ? "Stopping"
-        : busy
-          ? "Stop reading"
-          : "Read aloud";
-    const icon = broken
-      ? "TriangleAlert"
-      : phase === "loading"
-        ? "LoaderCircle"
-        : phase === "playing" || phase === "stopping"
-          ? "Square"
-          : "Volume2";
+    const label = {
+      idle: broken ? "Read aloud unavailable. Show how to fix it" : "Read aloud",
+      loading: "Stop reading",
+      waiting: "Stop reading; waiting for Central voice",
+      playing: "Stop reading",
+      stopping: "Stopping",
+    }[phase];
+    const icon = {
+      idle: broken ? "TriangleAlert" : "Volume2",
+      loading: "LoaderCircle",
+      waiting: "LoaderCircle",
+      playing: "Square",
+      stopping: "Square",
+    }[phase] satisfies ComponentProps<typeof Icon>["name"];
 
     return (
       <View style={{ flexDirection: "column", alignItems: "flex-start" }}>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={label}
-          accessibilityState={{ busy: phase === "loading" || phase === "stopping", disabled: phase === "stopping" }}
+          accessibilityState={{ busy: phase === "loading" || phase === "waiting" || phase === "stopping", disabled: phase === "stopping" }}
           disabled={phase === "stopping"}
           hitSlop={8}
           onPressIn={() => {
             if (!broken && !busy && canPrefetch) player.prefetch(key, item.data.text, agentId);
           }}
           onPress={() => {
-            if (broken) {
+            if (busy) player.stop(key);
+            else if (broken) {
               setPinned((open) => !open);
               void refetch();
-            } else if (busy) player.stop(key);
+            } else if (voice?.standardPlayback) void player.playCentral(key, item.data.text, onError);
             else void player.play(key, item.data.text, onError, agentId, canPrefetch);
           }}
           onHoverIn={() => {
@@ -123,6 +130,9 @@ export function createReadAloudRow(client: PluginClientContext) {
             color={broken ? theme.colors.statusDanger : busy || hovered ? theme.colors.foreground : muted}
           />
         </Pressable>
+        {phase === "waiting" ? (
+          <Text accessibilityLiveRegion="polite" style={{ color: muted, fontSize: 12 }}>Waiting for Central voice…</Text>
+        ) : null}
         {showHelp && voice ? (
           <View
             style={{

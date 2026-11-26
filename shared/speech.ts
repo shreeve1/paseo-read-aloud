@@ -8,6 +8,8 @@ export { MAX_SPOKEN_CHARS, toChunks, toSpeech } from "./text";
  * `session` groups the chunks of one press so a stop can drop the ones still waiting.
  * `durationMs` is set for WAV clips so the player can queue the next clip in time.
  */
+export const speechFile = z.object({ base64: z.string(), mimeType: z.string(), durationMs: z.number().optional() });
+
 export const synthesizeSpeech = defineRpc({
   name: "speech.synthesize",
   input: z.object({
@@ -20,8 +22,9 @@ export const synthesizeSpeech = defineRpc({
     automatic: z.boolean().optional(),
     manual: z.boolean().optional(),
     partial: z.literal(true).optional(),
+    preview: z.literal(true).optional(),
   }),
-  output: z.object({ base64: z.string(), mimeType: z.string(), durationMs: z.number().optional() }),
+  output: speechFile,
 });
 export type SpeechRequest = z.output<typeof synthesizeSpeech.input>;
 export type SpeechFile = z.output<typeof synthesizeSpeech.output>;
@@ -43,6 +46,7 @@ export const voiceStatus = defineRpc({
     provider: z.enum(["local", "openai", "google", "managed", "unknown"]).optional(),
     problem: z.string().optional(),
     unavailableVoiceId: z.string().optional(),
+    standardPlayback: z.literal(true).optional(),
     speakingProblem: z.string().optional(),
     steps: z.array(z.string()).optional(),
   }),

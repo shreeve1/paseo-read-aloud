@@ -46,22 +46,19 @@ the voice and speed to Google's defaults. Set up a Google key before using direc
 
 ## Central voice on a managed host
 
-Open **Settings > Plugins > Read Aloud** and select **Central voice**. Search by name, pick an
-approved Google Chirp 3 HD voice, and choose a **Speed**. The default is 1×. Other speeds
-require FFmpeg with the `atempo` filter on the Paseo host. If FFmpeg is unavailable, choose 1×.
-You don't need a Google key. If the service rejects your selected voice or **Refresh** finds
-that it was removed, the picker clears it. You can switch to **Paseo voice settings (local)**
-and use a downloaded voice from **Settings > Voice**.
+New hosted installs start on **Local voice**. If your company has approved Central voice
+for your login, open **Settings > Plugins > Read Aloud** and select **Central voice**. Search
+for an approved Google Chirp 3 HD voice by name and choose a **Speed**. Speeds other than 1×
+require FFmpeg on the Paseo host. You do not need a Google key.
 
-Under **Test voice**, press **Play** to hear “The blue notebook is on the shelf.” You can also
-press the speaker under a reply that says only that sentence. Both use your saved speed and
-count against the monthly limits for your login and company. Refresh uses no speech characters.
-The plugin keeps other replies on your host and does not read automatically. The separate Paseo
-Voice mode uses its own local speaking and listening settings. If Read Aloud finds the old
-Speaking connection to its personal bridge, it attempts to restore the previous setting and
-shows a warning if it can't confirm the restore.
+With Central voice selected, pressing the speaker on a finished reply sends the text to Google
+to make audio. **Test voice > Play** sends only “The blue notebook is on the shelf.” Both use
+your saved speed and count toward the monthly limits for your login and company. Refreshing
+voices sends no reply text. Switch to **Local voice** at any time to use a downloaded voice from
+**Settings > Voice**. Paseo Voice mode stays local.
 
-Your administrator sets up the private service. See the [hub protocol](shared/hub-protocol-v1.json)
+The earlier pilot remains limited to the fixed sample, even from the reply speaker. Your
+administrator manages which mode is available. See the [hub protocol](shared/hub-protocol-v1.json)
 for the required host files and credential helper.
 
 ## Voice mode on a personal install

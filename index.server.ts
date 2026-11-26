@@ -1,10 +1,13 @@
 import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin/server";
 import { googleClearKey, googleKeyStatus, googleSaveKey, googleVoices } from "./shared/google";
-import { DIRECT_VOICE_UNAVAILABLE, managedStatus, managedVoices, type ManagedStatus } from "./shared/managed";
+import {
+  centralChunk, DIRECT_VOICE_UNAVAILABLE, endCentral, managedStatus, managedVoices, startCentral, type ManagedStatus,
+} from "./shared/managed";
 import { voiceSettings, type VoiceSettings } from "./shared/settings";
 import { cancelSpeech, synthesizeSpeech, voiceStatus, type SpeechFile, type SpeechRequest, type VoiceStatus } from "./shared/speech";
 import protocol from "./shared/hub-protocol-v1.json" with { type: "json" };
 import { voiceModeConnect, voiceModeStatus } from "./shared/voice-mode";
+import { createCentralPlayback } from "./server/central-playback";
 import { HubError, loadMode, withLocalOption, type Mode } from "./server/managed";
 import { isManagedSpeedAvailable, SPEED_UNAVAILABLE } from "./server/managed-speed";
 import { addReadAloudRow } from "./server/reply-row";
@@ -16,7 +19,7 @@ import { createVoiceModeControls, restoreManagedSpeaking } from "./server/voice-
 type SpeechHandlers = {
   status(settings?: VoiceSettings): Promise<VoiceStatus>;
   synthesize(input: SpeechRequest, settings?: VoiceSettings): Promise<SpeechFile>;
-  close?(): Promise<void>;
+  close?(): void | Promise<void>;
 };
 
 const HOST_NOT_MANAGED = withLocalOption("This host is not configured for Central voice.");
@@ -51,16 +54,26 @@ function registerPersonal(
   };
 }
 
-function registerManaged(server: PluginServerContext, mode: Exclude<Mode, { kind: "personal" }>): SpeechHandlers {
+function registerManaged(
+  server: PluginServerContext, mode: Exclude<Mode, { kind: "personal" }>,
+  getSettings: () => Promise<VoiceSettings | undefined>,
+): SpeechHandlers {
+  const central = mode.kind === "managed" && mode.standard ? createCentralPlayback(mode.hub, getSettings) : undefined;
+  if (central) {
+    server.handle(startCentral, central.start);
+    server.handle(centralChunk, central.chunk);
+    server.handle(endCentral, central.end);
+  }
   // Tie denials to the saved selection, so a late response cannot invalidate a newer choice.
   const rejected = new WeakSet<VoiceSettings["managed"]>();
   server.handle(managedVoices, async () => {
-    if (mode.kind === "managed-unavailable") throw new Error(mode.reason);
+    if (mode.kind !== "managed") throw new Error(mode.reason ?? HOST_NOT_MANAGED);
     return mode.hub.voices();
   });
   return {
     async status(settings) {
-      if (settings?.provider === "google") return centralStatus(withLocalOption(DIRECT_VOICE_UNAVAILABLE));
+      if (mode.kind === "managed-local") return checkVoice(undefined, { localOnly: true });
+      if (!central && settings?.provider === "google") return centralStatus(withLocalOption(DIRECT_VOICE_UNAVAILABLE));
       if (settings?.provider !== "managed") return checkVoice(undefined, { localOnly: true });
       if (mode.kind === "managed-unavailable") return centralStatus(mode.reason);
       if (!settings.managed.voiceId) return centralStatus(CHOOSE_CENTRAL_VOICE);
@@ -68,11 +81,13 @@ function registerManaged(server: PluginServerContext, mode: Exclude<Mode, { kind
       if (rejected.has(settings.managed)) {
         return { ...centralStatus(new HubError("voice_not_allowed").message, voiceName || "Central voice"), unavailableVoiceId: voiceId };
       }
-      return centralStatus(undefined, voiceName || "Central voice");
+      const status = centralStatus(undefined, voiceName || "Central voice");
+      return central ? { ...status, standardPlayback: true } : status;
     },
     async synthesize(input, settings) {
       if (input.manual !== true || input.automatic || input.localOnly) throw new Error(MANUAL_PLAYBACK_ONLY);
-      if (settings?.provider === "google") throw new Error(withLocalOption(DIRECT_VOICE_UNAVAILABLE));
+      if (mode.kind === "managed-local") return synthesize({ ...input, localOnly: true });
+      if (!central && settings?.provider === "google") throw new Error(withLocalOption(DIRECT_VOICE_UNAVAILABLE));
       if (settings?.provider !== "managed") return synthesize({ ...input, localOnly: true });
       if (mode.kind === "managed-unavailable") throw new Error(mode.reason);
       if (!settings.managed.voiceId) throw new Error(CHOOSE_CENTRAL_VOICE);
@@ -80,31 +95,39 @@ function registerManaged(server: PluginServerContext, mode: Exclude<Mode, { kind
           (input.text !== protocol.pilot.fixture_text || input.partial || input.previous || input.next)) {
         throw new HubError("text_not_allowed");
       }
+      if (central && !input.preview) throw new Error(MANUAL_PLAYBACK_ONLY);
       if (rejected.has(settings.managed)) throw new HubError("voice_not_allowed");
       try {
-        return await synthesizeManaged(mode.hub, settings.managed, input);
+        const { hub } = mode;
+        const voice = settings.managed;
+        return await (central
+          ? central.exclusive(() => synthesizeManaged(hub, voice, { text: protocol.pilot.fixture_text }))
+          : synthesizeManaged(hub, voice, input));
       } catch (error) {
         if (error instanceof HubError && error.code === "voice_not_allowed") rejected.add(settings.managed);
         throw error;
       }
     },
+    close: central?.close,
   };
 }
 
 export function registerReadAloud(server: PluginServerContext, mode: Mode) {
   const settings = server.registerSettings(voiceSettings);
   let latest: VoiceSettings | undefined;
+  let observed = false;
   const unsubscribe = settings.subscribe((state) => {
-    if (state.status === "ready") latest = state.values;
+    observed = true;
+    latest = state.status === "ready" ? state.values : undefined;
   });
   const initial = settings.read().then((state) => {
-    if (state.status === "ready") latest ??= state.values;
+    if (!observed && state.status === "ready") latest = state.values;
   }, () => undefined);
   const getSettings = async () => {
     await initial;
     return latest;
   };
-  const handlers = mode.kind === "personal" ? registerPersonal(server, getSettings) : registerManaged(server, mode);
+  const handlers = mode.kind === "personal" ? registerPersonal(server, getSettings) : registerManaged(server, mode, getSettings);
 
   let speakingRestore: Promise<string | undefined> | undefined;
   function checkSpeaking({ paseo }: PluginHandlerContext) {
@@ -118,9 +141,10 @@ export function registerReadAloud(server: PluginServerContext, mode: Mode) {
   server.handle(managedStatus, async (_input, context): Promise<ManagedStatus> => {
     if (mode.kind === "personal") return { mode: mode.kind };
     const speakingProblem = await checkSpeaking(context);
-    return mode.kind === "managed-unavailable"
-      ? { mode: mode.kind, reason: mode.reason, speakingProblem }
-      : { mode: mode.kind, speakingProblem, speedProblem: await speedAvailable ? undefined : SPEED_UNAVAILABLE };
+    if (mode.kind === "managed-unavailable") return { mode: mode.kind, reason: mode.reason, speakingProblem };
+    if (mode.kind === "managed-local") return { mode: mode.kind, reason: mode.reason, speakingProblem };
+    return { mode: mode.kind, standard: mode.standard, speakingProblem,
+      speedProblem: await speedAvailable ? undefined : SPEED_UNAVAILABLE };
   });
   server.handle(synthesizeSpeech, async (input) => handlers.synthesize(input, await getSettings()));
   server.handle(cancelSpeech, cancel);

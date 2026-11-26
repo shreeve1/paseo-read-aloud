@@ -10,8 +10,12 @@ const managedSources = [
   { value: "managed", label: "Central voice" },
 ] as const;
 
-export function voiceSources(mode: ManagedStatus["mode"]) {
-  return mode === "personal" ? personalSources : managedSources;
+const localVoice = { value: "paseo", label: "Local voice" } as const;
+
+export function voiceSources(mode: ManagedStatus["mode"], standard = false) {
+  if (mode === "personal") return personalSources;
+  if (mode === "managed-local") return [localVoice];
+  return standard ? [localVoice, managedSources[1]] : managedSources;
 }
 
 export function shouldAutoRead(mode: ManagedStatus["mode"] | undefined, enabled: boolean): boolean {

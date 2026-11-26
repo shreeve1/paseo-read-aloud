@@ -21,16 +21,16 @@ export function createVoicePreview() {
       if (state.status === "error") setState({ status: "idle" });
     },
     async play({ mode, speak, playAudio }: {
-      mode: "personal" | "managed";
+      mode: "personal" | "managed" | "standard" | "local";
       speak: (request: SpeechRequest) => Promise<SpeechFile>;
       playAudio: (audio: SpeechFile) => Promise<void>;
     }) {
       if (state.status === "playing") return;
       setState({ status: "playing" });
       try {
-        const audio = await speak(mode === "managed"
-          ? { text: protocol.pilot.fixture_text, manual: true }
-          : { text: "Hello. This is how your Read Aloud voice sounds." });
+        const audio = await speak(mode === "managed" || mode === "standard"
+          ? { text: protocol.pilot.fixture_text, manual: true, ...(mode === "standard" ? { preview: true } : {}) }
+          : { text: "Hello. This is how your Read Aloud voice sounds.", ...(mode === "local" ? { manual: true } : {}) });
         await playAudio(audio);
         setState({ status: "idle" });
       } catch (error) {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { Server } from "node:net";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -12,11 +12,12 @@ import { registerReadAloud } from "../index.server";
 import type { Mode } from "../server/managed";
 import { bridgePort } from "../server/speech-bridge";
 import protocol from "../shared/hub-protocol-v1.json" with { type: "json" };
-import { managedStatus, managedVoices } from "../shared/managed";
+import { centralChunk, endCentral, managedStatus, managedVoices, startCentral } from "../shared/managed";
 import { voiceSettings, type ManagedSpeed, type VoiceSettings } from "../shared/settings";
 import { cancelSpeech, synthesizeSpeech, voiceStatus, type SpeechFile } from "../shared/speech";
 import { voiceModeStatus } from "../shared/voice-mode";
 import { mockHub } from "./managed-fixture";
+import { deferred } from "./deferred";
 
 const text = protocol.pilot.fixture_text;
 
@@ -311,4 +312,123 @@ test("a missing FFmpeg blocks non-1x speech before calling the hub and still all
   server.changeSpeed(1);
   assert.equal(synthesizeSpeech.output.parse(await server.call(synthesizeSpeech.name, { text, manual: true })).mimeType, "audio/wav");
   assert.equal(requests.length, 1);
+});
+
+const approvedVoice = { id: "one", name: "First" };
+const voiceList = (mode?: unknown) => JSON.stringify({ voices: [approvedVoice], reply_mode: mode });
+const json = { "Content-Type": "application/json" };
+const pcmHeaders = { "Content-Type": "application/octet-stream", "X-Audio-Format": "pcm_s16le_24000_mono" };
+
+test("a hosted Local profile ignores retained Central and personal choices and never registers their handlers", async (t) => {
+  const server = plugin(t, { kind: "managed-local" }, "managed");
+  assert.equal(managedStatus.output.parse(await server.call(managedStatus.name)).mode, "managed-local");
+  for (const handler of [voiceModeStatus, startCentral, centralChunk, endCentral, { name: "google.save-key" }]) {
+    assert.equal(server.handlers.has(handler.name), false);
+  }
+  await assert.rejects(server.call(managedVoices.name), /not configured for Central voice/);
+  const dir = mkdtempSync(".local-test-");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  overrideEnv(t, "PASEO_HOME", dir);
+  overrideEnv(t, "PASEO_VOICE_TTS_PROVIDER", "openai");
+  const fetch = t.mock.method(globalThis, "fetch", async () => assert.fail("Unexpected fetch"));
+  for (const provider of ["managed", "google", "paseo"] as const) {
+    server.changeProvider(provider);
+    await assert.rejects(server.call(synthesizeSpeech.name, { text, manual: true }), /Only local voices/);
+  }
+  assert.equal(fetch.mock.callCount(), 0);
+});
+
+test("standard presses use an authenticated permit and the approved selected voice; preview is always the fixture", async (t) => {
+  let mode: unknown = "standard";
+  let synthesisDenied = false;
+  const { hub, requests } = await mockHub(t, (request, response) => {
+    if (request.method === "GET") response.writeHead(200, json).end(voiceList(mode));
+    else if (synthesisDenied) response.writeHead(403, json).end('{"error":{"code":"not_granted","message":"Revoked"}}');
+    else response.writeHead(200, pcmHeaders).end(Buffer.from([1, 2]));
+  });
+  const server = plugin(t, { kind: "managed", standard: true, hub }, "managed");
+  const press = async (session: string) => startCentral.output.parse(await server.call(startCentral.name, { session }));
+  const chunk = (session: string, permit: string, index: number, text: string) =>
+    server.call(centralChunk.name, { session, permit, index, text });
+  const payloads = () => requests.filter(({ method }) => method === "POST").map(({ body }) => JSON.parse(body));
+
+  await assert.rejects(server.call(synthesizeSpeech.name, { text: "Forbidden reply.", manual: true }), /pilot only reads/);
+  await assert.rejects(server.call(synthesizeSpeech.name, { text, manual: true }), /Press the speaker/);
+  await assert.rejects(server.call(synthesizeSpeech.name, { text: "Forbidden reply.", manual: true, preview: true }), /pilot only reads/);
+  await assert.rejects(server.call(synthesizeSpeech.name, { text, manual: true, preview: true, automatic: true }), /Automatic reading is off/);
+  await assert.rejects(server.call(synthesizeSpeech.name, { text, localOnly: true }), /Press the speaker button/);
+  assert.equal(voiceStatus.output.parse(await server.call(voiceStatus.name)).standardPlayback, true);
+  assert.deepEqual(requests, []);
+
+  server.changeProvider("paseo");
+  await assert.rejects(press("local"), /Choose a Central voice/);
+  assert.deepEqual(requests, []);
+  server.changeProvider("managed");
+
+  for (const missingOrRestricted of [undefined, "pilot", "unknown", { mode: "standard" }, null]) {
+    mode = missingOrRestricted;
+    await assert.rejects(press("restricted"), /has not been approved to read replies/);
+  }
+  assert.deepEqual(payloads(), []);
+  await server.call(synthesizeSpeech.name, { text, manual: true, preview: true });
+  assert.deepEqual(payloads(), [{ voice_id: "one", text }]);
+
+  mode = "standard";
+  const first = await press("session-one");
+  assert.equal(first.kind, "ready");
+  assert.equal(first.voiceId, "one");
+  await assert.rejects(chunk("other-session", first.permit, 0, "Can't use another press."), /playback ended/);
+  assert.deepEqual(await server.call(endCentral.name, { session: "other-session", permit: first.permit }), { ok: false });
+  await assert.rejects(chunk("session-one", "0".repeat(64), 0, "Invented permit."), /playback ended/);
+  await assert.rejects(chunk("session-one", first.permit, 1, "Out of order."), /playback ended/);
+  const firstText = "The authorized synthetic reply.";
+  assert.equal(centralChunk.output.parse(await chunk("session-one", first.permit, 0, firstText)).kind, "audio");
+  await assert.rejects(chunk("session-one", first.permit, 0, firstText), /playback ended/);
+  assert.deepEqual(payloads(), [{ voice_id: "one", text }, { voice_id: "one", text: firstText }]);
+
+  synthesisDenied = true;
+  await assert.rejects(chunk("session-one", first.permit, 1, "This chunk is denied."), /not enabled for this login/);
+  const requestCount = requests.length;
+  await assert.rejects(chunk("session-one", first.permit, 1, "Cannot retry a revoked chunk."), /playback ended/);
+  assert.equal(requests.length, requestCount);
+
+  const second = await press("session-two");
+  assert.equal(second.kind, "ready");
+  server.changeSpeed(1.5);
+  await assert.rejects(chunk("session-two", second.permit, 0, "The selected voice settings changed."), /playback ended/);
+  assert.equal(requests.length, requestCount + 1);
+});
+
+test("a managed request occupies the daemon slot through Stop, and a late clip cannot escape", async (t) => {
+  const { promise: held, resolve: release } = deferred<void>();
+  const { promise: entered, resolve: signalEntered } = deferred<void>();
+  const { hub, requests } = await mockHub(t, async (request, response) => {
+    if (request.method === "GET") response.writeHead(200, json).end(voiceList("standard"));
+    else {
+      signalEntered();
+      await held;
+      response.writeHead(200, pcmHeaders).end(Buffer.from([1, 2]));
+    }
+  });
+  const server = plugin(t, { kind: "managed", standard: true, hub }, "managed");
+  const session = "original-device";
+  const first = startCentral.output.parse(await server.call(startCentral.name, { session }));
+  assert.equal(first.kind, "ready");
+  const press = { session, permit: first.permit };
+  const late = server.call(centralChunk.name, { ...press, index: 0, text: "Admitted chunk." });
+  const stopped = assert.rejects(late, /playback ended/);
+  await entered;
+  try {
+    await assert.rejects(server.call(startCentral.name, { session: "second-device" }), /busy/);
+    await assert.rejects(server.call(synthesizeSpeech.name, { text, manual: true, preview: true }), /busy/);
+    assert.deepEqual(await server.call(endCentral.name, press), { ok: true });
+    await assert.rejects(server.call(startCentral.name, { session: "second-device" }), /busy/);
+    assert.equal(requests.length, 2);
+  } finally {
+    release();
+  }
+  await stopped;
+  await assert.rejects(server.call(centralChunk.name, { ...press, index: 1, text: "Unsent chunk." }), /playback ended/);
+  assert.equal(startCentral.output.parse(await server.call(startCentral.name, { session: "second-device" })).kind, "ready");
+  assert.deepEqual(requests.map(({ method }) => method), ["GET", "POST", "GET"]);
 });

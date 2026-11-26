@@ -48,28 +48,26 @@ Paseo plays the audio on the device that starts playback.
 
 ## Managed hosts
 
-**Central voice** uses a private speech service. In Read Aloud settings, search
-for an approved Google Chirp 3 HD voice by name, pick a voice, and set its speed.
-Other speeds besides 1× require FFmpeg with the `atempo` filter on the Paseo host.
-If the service removes your voice, choose another approved voice or switch to
-**Paseo voice settings (local)** to use a downloaded voice.
+New hosted logins start with **Local voice**. An administrator can make **Central voice**
+available after your company opts in and the hub grants access to your login. In Read Aloud
+settings, search by name, choose an approved Google Chirp 3 HD voice, and set its speed.
+Speeds other than 1× require FFmpeg with the `atempo` filter on the host.
 
-Press **Test voice > Play** to hear “The blue notebook is on the shelf.” During
-the pilot, you can also press the speaker under a reply that says only that
-sentence. Both use your saved speed and count toward your login and company
-speech limits. Refreshing voices uses no speech characters. The plugin checks
-replies locally before making a speech request. The managed service keeps the
-Google key, and Paseo's separate Voice mode keeps speaking and listening local.
-If a Speaking setting still points to the personal bridge, Read Aloud attempts
-to restore the previous setting and shows a warning if it can't confirm the
-restore.
+Press the speaker beside a finished reply to read it. With Central voice selected, the reply
+text goes to Google to make audio. **Test voice > Play** reads only “The blue notebook is on
+the shelf.” The earlier pilot can also play the fixed sample from the speaker and rejects all
+other replies. Playback and previews count toward the login and company limits. Refreshing
+voices does not send reply text.
 
-The server selects its mode at startup. Without a managed configuration file it
-uses personal mode. When the file is present, the configuration, CA certificate,
-and helper, along with each file's parent directory, must be owned by root
-and writable only by root. If the files are invalid or incomplete, Central
-voice stays unavailable.
-See the [hub protocol](shared/hub-protocol-v1.json) for paths and formats.
+Managed hosts never read replies automatically. Paseo Voice mode keeps speaking and listening
+local. If Speaking still points to the personal speech bridge, Read Aloud attempts to restore
+the previous setting and shows a warning if it cannot confirm the restore.
+
+At startup and reload, Read Aloud checks for a standard profile for the operating system login.
+Root must own the profile directories and files. Read Aloud rejects symbolic links and
+group- or world-writable entries. An invalid profile leaves speech Local. When the login has no
+standard profile, Read Aloud checks the legacy managed configuration, then uses personal mode if
+that configuration is absent. See the [hub protocol](shared/hub-protocol-v1.json) for file formats.
 
 ## Personal setup
 
@@ -111,8 +109,8 @@ the client for playback. For Central voice, the daemon verifies the private hub'
 certificate and host name before sending the existing hosted login credential
 and the current text chunk. Adjacent chunks stay on the daemon. The plugin does
 not store another copy of the credential, start a speech bridge, or call a
-speech provider directly. The hub handles provider credentials and enforces
-the pilot's synthetic text restriction.
+speech provider directly. The hub checks access and limits at every request and retains the
+fixed sample restriction for the pilot.
 
 On a personal install, OpenAI and Google receive the cleaned reply text
 in short chunks. Cloud requests can start when you press the speaker button,
@@ -131,10 +129,10 @@ setting stays on the device.
 ## Limitations
 
 - One reply is read at a time; starting another stops the current one.
-- Paseo can't cut a clip off mid-way, so Stop takes effect at the end of the
-  part currently playing (usually a few seconds). The button shows it is
-  stopping until then.
+- **Stop** cancels a Central voice wait, drops any late audio, and sends no more text. A
+  request the hub already accepted can finish. Paseo cannot interrupt a clip it has already
+  started, so **Stopping** stays visible until the current clip ends.
 - Reading carries on if you scroll the reply out of view.
-- Personal installs read up to about 20,000 characters of a reply per press.
+- Read Aloud plays up to about 20,000 characters of a reply per press.
 - The selected voice and model determine which languages are available.
 - Replies that finished before the plugin was enabled have no speaker button.
