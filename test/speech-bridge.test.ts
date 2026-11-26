@@ -5,6 +5,7 @@ import { setTimeout } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
 import { z } from "zod";
 import { bridgePort, startSpeechBridge } from "../server/speech-bridge.ts";
+import { pcmClip } from "../server/tts.ts";
 import { voiceSettings } from "../shared/settings.ts";
 
 const settings = voiceSettings.schema.parse({
@@ -13,11 +14,23 @@ const settings = voiceSettings.schema.parse({
 }).google;
 const env = { PASEO_HOME: import.meta.dirname, GOOGLE_TTS_API_KEY: "fake-key", OPENAI_TTS_API_KEY: "test-tts-key" };
 const authorization = { Authorization: `Bearer ${env.OPENAI_TTS_API_KEY}` };
-const bytes = Uint8Array.of(0, 0, 7, 123, 255, 253);
+const bytes = Buffer.from([0, 0, 7, 123, 255, 253]);
+const canonicalWav = Buffer.from(pcmClip([0.5, 0.5, 0.5], 24_000).base64, "base64");
+bytes.copy(canonicalWav, 44);
+const wav = Buffer.concat([
+  canonicalWav.subarray(0, 36), Buffer.from("JUNK\u0001\u0000\u0000\u0000X\u0000"), canonicalWav.subarray(36),
+]);
+wav.writeUInt32LE(wav.length - 8, 4);
 const errorBody = z.object({ error: z.object({ message: z.string(), type: z.string() }) });
 
 async function openBridge(t: TestContext, options: Partial<Parameters<typeof startSpeechBridge>[0]> = {}) {
-  const upstream = t.mock.fn<typeof fetch>(async () => Response.json({ audioContent: Buffer.from(bytes).toString("base64") }));
+  const upstream = t.mock.fn<typeof fetch>(async (_url, init) => {
+    const encoding = JSON.parse(String(init?.body)).audioConfig.audioEncoding;
+    if (encoding === "PCM") {
+      return Response.json({ error: { status: "INVALID_ARGUMENT", message: "PCM is not supported for this voice." } }, { status: 400 });
+    }
+    return Response.json({ audioContent: (encoding === "LINEAR16" ? wav : bytes).toString("base64") });
+  });
   const bridge = startSpeechBridge({
     getSettings: async () => settings, port: 0, env, fetchSpeech: upstream, ...options,
   });
@@ -111,18 +124,18 @@ test("the bridge prompts to reconnect when no private key is configured", async 
   assert.equal(upstream.mock.callCount(), 0);
 });
 
-test("the bridge sends the main voice and returns the requested audio bytes unchanged", async (t) => {
+test("the bridge sends the main voice and extracts only WAV samples for PCM", async (t) => {
   const { speak, upstream } = await openBridge(t);
-  for (const [format, upstreamFormat, contentType] of [
-    ["pcm", "PCM", "audio/pcm"],
-    ["mp3", "MP3", "audio/mpeg"],
-    [undefined, "MP3", "audio/mpeg"],
-    ["wav", "LINEAR16", "audio/wav"],
-  ]) {
+  for (const [format, upstreamFormat, contentType, expected] of [
+    ["pcm", "LINEAR16", "audio/pcm", bytes],
+    ["mp3", "MP3", "audio/mpeg", bytes],
+    [undefined, "MP3", "audio/mpeg", bytes],
+    ["wav", "LINEAR16", "audio/wav", wav],
+  ] as const) {
     const response = await speak({ input: "Hello", response_format: format, voice: "ignored", model: "ignored" });
-    assert.equal(response.status, 200);
+    assert.equal(response.status, 200, String(format));
     assert.equal(response.headers.get("content-type"), contentType);
-    assert.deepEqual(new Uint8Array(await response.arrayBuffer()), bytes);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), expected);
     const call = upstream.mock.calls.at(-1);
     assert.ok(call);
     const [url, init] = call.arguments;
@@ -141,6 +154,15 @@ test("the bridge sends the main voice and returns the requested audio bytes unch
   }
 });
 
+test("the bridge returns one PCM response for a long Voice mode reply", async (t) => {
+  const { speak, upstream } = await openBridge(t);
+  const response = await speak({ input: "The notebook is on the shelf. ".repeat(200), response_format: "pcm" });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "audio/pcm");
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.concat([bytes, bytes]));
+  assert.equal(upstream.mock.callCount(), 2);
+});
+
 test("invalid routes, methods, JSON, formats and oversized requests do not call Google", async (t) => {
   const { base, speak, upstream } = await openBridge(t);
   const url = base + "/v1/audio/speech";
@@ -151,7 +173,6 @@ test("invalid routes, methods, JSON, formats and oversized requests do not call 
     [400, await speak({ input: "Hello", response_format: "opus" })],
     [400, await speak({ input: " " })],
     [400, await speak({ input: "\u00e9".repeat(32 * 1024) })],
-    [400, await speak({ input: "\u00e9".repeat(2501) })],
     [403, await fetch(url, { method: "POST", headers: { ...authorization, Origin: "https://example.test" }, body: '{"input":"hello"}' })],
   ] as const;
   for (const [status, response] of responses) {

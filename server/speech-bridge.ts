@@ -5,7 +5,7 @@ import type { VoiceSettings } from "../shared/settings";
 import { readKey } from "./google-key";
 import { paseoHome } from "./paths";
 import { GoogleSpeechError } from "./google";
-import { requestGoogle, type GoogleAudioFormat } from "./tts";
+import { readPcmWav, requestGoogle, type GoogleAudioFormat } from "./tts";
 import { readDaemonConfig, resolveOpenAiTtsKey } from "./voices";
 
 const HOST = "127.0.0.1";
@@ -27,7 +27,8 @@ const speechInput = z.object({
 });
 
 const formats = {
-  pcm: { format: "PCM", contentType: "audio/pcm" },
+  // Chirp 3 HD only returns these samples inside a WAV container.
+  pcm: { format: "LINEAR16", contentType: "audio/pcm" },
   mp3: { format: "MP3", contentType: "audio/mpeg" },
   wav: { format: "LINEAR16", contentType: "audio/wav" },
 } satisfies Record<z.output<typeof speechInput>["response_format"], { format: GoogleAudioFormat; contentType: string }>;
@@ -118,8 +119,9 @@ export function startSpeechBridge({
     const audio = await requestGoogle({
       apiKey, voiceName: settings?.voiceName ?? "", speed: settings?.speed ?? 1,
     }, { text: input, format, fetchSpeech, signal: consumer.signal });
+    const output = response_format === "pcm" ? readPcmWav(audio).samples : audio;
     res.writeHead(200, { "Content-Type": contentType });
-    res.end(audio);
+    res.end(output);
   }
 
   const server = createServer((req, res) => {

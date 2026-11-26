@@ -100,6 +100,65 @@ test("Read Aloud requests the agent's voice without context and keeps the WAV by
   assert.deepEqual(await checkVoice(settings), { ok: true, voice: "Charon", provider: "google" });
 });
 
+test("long Google requests split at sentences and build one WAV with all the samples", async (t) => {
+  const first = "The first passage is here. ".repeat(150);
+  const second = "Another " + "short phrase ".repeat(150) + "ends here.";
+  const chunks: string[] = [];
+  let previousFinished = true;
+  const fetchSpeech = t.mock.fn<typeof fetch>(async (_url, init) => {
+    assert.ok(previousFinished, "Google requests must run sequentially");
+    previousFinished = false;
+    chunks.push(JSON.parse(String(init?.body)).input.text);
+    await setImmediate();
+
+    const clip = Buffer.from(pcmClip([chunks.length / 4], 24_000).base64, "base64");
+    previousFinished = true;
+    return Response.json({ audioContent: clip.toString("base64") });
+  });
+  const audio = await requestGoogle(googleVoice, { ...request, text: first + second, fetchSpeech });
+  assert.deepEqual(chunks, [first, second]);
+  assert.ok(chunks.every((chunk) => Buffer.byteLength(chunk) <= 5_000));
+  assert.equal(audio.toString("ascii", 0, 4), "RIFF");
+  assert.equal(audio.readUInt32LE(4), audio.length - 8);
+  assert.equal(audio.readUInt32LE(24), 24_000);
+  assert.equal(audio.toString("ascii", 36, 40), "data");
+  assert.equal(audio.readUInt32LE(40), 4);
+  assert.equal(audio.length, 48);
+  assert.equal(audio.readInt16LE(44), 8192);
+  assert.equal(audio.readInt16LE(46), 16384);
+});
+
+test("long MP3 requests split at whitespace or whole UTF-8 characters and join the bytes", async (t) => {
+  for (const [first, second] of [
+    ["word ".repeat(899), "untouched".repeat(200)],
+    ["x".repeat(4499), "\u{1F600}".repeat(600)],
+  ]) {
+    const chunks: string[] = [];
+    const fetchSpeech = t.mock.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      assert.equal(body.audioConfig.audioEncoding, "MP3");
+      chunks.push(body.input.text);
+      return Response.json({ audioContent: Buffer.of(chunks.length, 255).toString("base64") });
+    });
+    const audio = await requestGoogle(googleVoice, { text: first + second, format: "MP3", fetchSpeech });
+    assert.deepEqual(chunks, [first, second]);
+    assert.ok(chunks.every((chunk) => Buffer.byteLength(chunk) <= 5_000));
+    assert.deepEqual(audio, Buffer.of(1, 255, 2, 255));
+  }
+});
+
+test("aborting a long request does not send its remaining Google chunks", async (t) => {
+  const controller = new AbortController();
+  const fetchSpeech = t.mock.fn<typeof fetch>(async () => {
+    controller.abort();
+    return Response.json({ audioContent: fakeAudio });
+  });
+  await assert.rejects(requestGoogle(googleVoice, {
+    text: "Read this. ".repeat(600), format: "MP3", fetchSpeech, signal: controller.signal,
+  }), { name: "AbortError" });
+  assert.equal(fetchSpeech.mock.callCount(), 1);
+});
+
 test("Google errors explain common failures without leaking credentials", async (t) => {
   for (const [code, status, reason, message, bridgeStatus] of [
     [400, "INVALID_ARGUMENT", "API_KEY_INVALID", /Google rejected the API key/, 401],

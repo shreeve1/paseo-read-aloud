@@ -110,8 +110,39 @@ function openAiError(status: number, body: string): Error {
   return new Error(`OpenAI TTS request failed (${status})${detail ? ": " + detail : ""}`);
 }
 
-export type GoogleAudioFormat = "PCM" | "MP3" | "LINEAR16";
+export type GoogleAudioFormat = "MP3" | "LINEAR16";
 const googleAudio = z.object({ audioContent: z.base64().min(1) });
+const GOOGLE_CHUNK_BYTES = 4_500;
+
+function* googleChunks(text: string, languageCode: string): Iterable<string> {
+  if (Buffer.byteLength(text) <= GOOGLE_CHUNK_BYTES) {
+    yield text;
+    return;
+  }
+  const segmenter = new Intl.Segmenter(languageCode, { granularity: "sentence" });
+  const sentences = new Set(Array.from(segmenter.segment(text), ({ index, segment }) => index + segment.length));
+  for (let start = 0; start < text.length;) {
+    let end = start;
+    let sentenceEnd = start;
+    let wordEnd = start;
+    let bytes = 0;
+    // String iteration advances by code point, so even a hard split preserves UTF-8 characters.
+    for (const char of text.slice(start)) {
+      bytes += Buffer.byteLength(char);
+      if (bytes > GOOGLE_CHUNK_BYTES) break;
+      end += char.length;
+      if (sentences.has(end)) sentenceEnd = end;
+      if (/\s/.test(char)) wordEnd = end;
+    }
+    if (end < text.length) {
+      if (sentenceEnd > start) end = sentenceEnd;
+      else if (wordEnd > start) end = wordEnd;
+    }
+    const chunk = text.slice(start, end);
+    if (chunk.trim()) yield chunk;
+    start = end;
+  }
+}
 
 export async function requestGoogle(
   voice: Pick<GoogleVoice, "apiKey" | "voiceName" | "speed">,
@@ -124,29 +155,31 @@ export async function requestGoogle(
   if (!apiKey) throw new GoogleSpeechError(400, "No Google API key is configured. " + GOOGLE_SETTINGS);
   const languageCode = GOOGLE_VOICE_NAME.exec(voiceName)?.[1];
   if (!languageCode) throw new GoogleSpeechError(400, "Choose a Google Chirp 3 HD voice. " + GOOGLE_SETTINGS);
-  if (Buffer.byteLength(text, "utf8") > 5000) {
-    throw new GoogleSpeechError(400, "Google speech input exceeds 5,000 bytes. Send a shorter passage.");
-  }
-  const body = JSON.stringify({
-    input: { text },
-    voice: { languageCode, name: voiceName },
-    audioConfig: {
-      audioEncoding: format,
-      ...(format !== "MP3" ? { sampleRateHertz: CLOUD_SAMPLE_RATE } : {}),
-      speakingRate: speed,
-    },
-  });
+  const audioConfig = {
+    audioEncoding: format,
+    ...(format === "LINEAR16" ? { sampleRateHertz: CLOUD_SAMPLE_RATE } : {}),
+    speakingRate: speed,
+  };
   return withSpeechRequest("Google", session, async (signal) => {
-    const response = await fetchGoogle(() => fetchSpeech(`${GOOGLE_API}/text:synthesize`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Goog-Api-Key": apiKey },
-      body,
-      signal: signal as RequestInit["signal"],
-    }), "speech", signal);
-    const result = googleAudio.safeParse(await response.json().catch(() => null));
-    signal.throwIfAborted();
-    if (!result.success) throw new GoogleSpeechError(502, "Google returned invalid speech audio.");
-    return Buffer.from(result.data.audioContent, "base64");
+    const clips: Buffer[] = [];
+    for (const chunk of googleChunks(text, languageCode)) {
+      if (!chunk.trim()) continue;
+      const body = JSON.stringify({ input: { text: chunk }, voice: { languageCode, name: voiceName }, audioConfig });
+      const response = await fetchGoogle(() => fetchSpeech(`${GOOGLE_API}/text:synthesize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Goog-Api-Key": apiKey },
+        body,
+        signal: signal as RequestInit["signal"],
+      }), "speech", signal);
+      const result = googleAudio.safeParse(await response.json().catch(() => null));
+      signal.throwIfAborted();
+      if (!result.success) throw new GoogleSpeechError(502, "Google returned invalid speech audio.");
+      clips.push(Buffer.from(result.data.audioContent, "base64"));
+    }
+    const [first, ...rest] = clips;
+    if (!first) throw new GoogleSpeechError(400, "Nothing to read aloud");
+    if (!rest.length) return first;
+    return format === "LINEAR16" ? joinWav(first, rest) : Buffer.concat(clips);
   }, consumerSignal);
 }
 
@@ -310,23 +343,28 @@ function trimSilence(samples: ArrayLike<number>, sampleRate: number): { start: n
   };
 }
 
-/** Float32 samples in -1..1 (a slice of them) to a 16-bit PCM mono WAV file. */
-function encodeWav(samples: ArrayLike<number>, sampleRate: number, start = 0, end = samples.length): Buffer {
-  const count = Math.max(0, end - start);
-  const buffer = Buffer.alloc(44 + count * 2);
+function allocatePcmWav(dataSize: number, sampleRate: number, channels = 1): Buffer {
+  const buffer = Buffer.alloc(44 + dataSize);
   buffer.write("RIFF", 0);
-  buffer.writeUInt32LE(36 + count * 2, 4);
+  buffer.writeUInt32LE(36 + dataSize, 4);
   buffer.write("WAVE", 8);
   buffer.write("fmt ", 12);
   buffer.writeUInt32LE(16, 16);
   buffer.writeUInt16LE(1, 20);
-  buffer.writeUInt16LE(1, 22);
+  buffer.writeUInt16LE(channels, 22);
   buffer.writeUInt32LE(sampleRate, 24);
-  buffer.writeUInt32LE(sampleRate * 2, 28);
-  buffer.writeUInt16LE(2, 32);
+  buffer.writeUInt32LE(sampleRate * channels * 2, 28);
+  buffer.writeUInt16LE(channels * 2, 32);
   buffer.writeUInt16LE(16, 34);
   buffer.write("data", 36);
-  buffer.writeUInt32LE(count * 2, 40);
+  buffer.writeUInt32LE(dataSize, 40);
+  return buffer;
+}
+
+/** Float32 samples in -1..1 (a slice of them) to a 16-bit PCM mono WAV file. */
+function encodeWav(samples: ArrayLike<number>, sampleRate: number, start = 0, end = samples.length): Buffer {
+  const count = Math.max(0, end - start);
+  const buffer = allocatePcmWav(count * 2, sampleRate);
   for (let i = 0; i < count; i++) {
     const value = Math.max(-1, Math.min(1, samples[start + i]));
     buffer.writeInt16LE(Math.round(value < 0 ? value * 0x8000 : value * 0x7fff), 44 + i * 2);
@@ -356,25 +394,61 @@ function pcm16Clip(body: ArrayBuffer | Uint8Array): SpeechFile {
   return pcmClip(samples, CLOUD_SAMPLE_RATE);
 }
 
-function wavClip(audio: Buffer): SpeechFile {
-  if (audio.toString("ascii", 0, 4) === "RIFF" && audio.toString("ascii", 8, 12) === "WAVE") {
-    let bytesPerSecond = 0;
-    let dataSize: number | undefined;
-    // The fmt and data chunks are not necessarily adjacent.
-    for (let offset = 12; offset + 8 <= audio.length;) {
-      const chunk = audio.toString("ascii", offset, offset + 4);
-      const size = audio.readUInt32LE(offset + 4);
-      const start = offset + 8;
-      if (start + size > audio.length) break;
-      if (chunk === "fmt " && size >= 16) bytesPerSecond = audio.readUInt32LE(start + 8);
-      if (chunk === "data") dataSize = size;
-      if (bytesPerSecond && dataSize !== undefined) {
-        return { base64: audio.toString("base64"), mimeType: "audio/wav", durationMs: dataSize * 1000 / bytesPerSecond };
-      }
-      offset = start + size + (size % 2);
+export function readPcmWav(audio: Buffer) {
+  const invalid = () => new GoogleSpeechError(502, "Google returned an invalid PCM WAV file.");
+  if (audio.length < 12 || audio.toString("latin1", 0, 4) !== "RIFF" || audio.toString("latin1", 8, 12) !== "WAVE") {
+    throw invalid();
+  }
+  const end = audio.readUInt32LE(4) + 8;
+  if (end > audio.length) throw invalid();
+
+  let format: { channels: number; sampleRate: number } | undefined;
+  let samples: Buffer | undefined;
+  // RIFF allows metadata between these chunks and pads odd sizes to an even offset.
+  for (let offset = 12; offset + 8 <= end;) {
+    const chunk = audio.toString("latin1", offset, offset + 4);
+    const size = audio.readUInt32LE(offset + 4);
+    const start = offset + 8;
+    offset = start + size + (size % 2);
+    if (offset > end) throw invalid();
+    if (chunk === "fmt ") {
+      if (size < 16 || audio.readUInt16LE(start) !== 1 || audio.readUInt16LE(start + 14) !== 16) throw invalid();
+      const channels = audio.readUInt16LE(start + 2);
+      const sampleRate = audio.readUInt32LE(start + 4);
+      if (!channels || !sampleRate || audio.readUInt16LE(start + 12) !== channels * 2 ||
+          audio.readUInt32LE(start + 8) !== sampleRate * channels * 2) throw invalid();
+      format = { channels, sampleRate };
+    }
+    if (chunk === "data") samples = audio.subarray(start, start + size);
+    if (format && samples) {
+      if (samples.length % (format.channels * 2) !== 0) throw invalid();
+      return { ...format, samples };
     }
   }
-  throw new Error("Google returned an invalid WAV file.");
+  throw invalid();
+}
+
+function joinWav(first: Buffer, rest: Buffer[]): Buffer {
+  const { channels, sampleRate, samples } = readPcmWav(first);
+  const parts = [samples];
+  let dataSize = samples.length;
+  for (const wav of rest) {
+    const part = readPcmWav(wav);
+    if (part.channels !== channels || part.sampleRate !== sampleRate) {
+      throw new GoogleSpeechError(502, "Google returned WAV clips with different audio formats.");
+    }
+    parts.push(part.samples);
+    dataSize += part.samples.length;
+  }
+  const joined = allocatePcmWav(dataSize, sampleRate, channels);
+  let offset = 44;
+  for (const part of parts) offset += part.copy(joined, offset);
+  return joined;
+}
+
+function wavClip(audio: Buffer): SpeechFile {
+  const { channels, sampleRate, samples } = readPcmWav(audio);
+  return { base64: audio.toString("base64"), mimeType: "audio/wav", durationMs: samples.length * 1000 / (sampleRate * channels * 2) };
 }
 
 export async function synthesizeManaged(
