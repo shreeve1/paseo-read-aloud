@@ -230,7 +230,7 @@ test("keys are checked with voice lookup, saved privately, and overridden by the
   assert.deepEqual(keyStatus(), { saved: false, source: "none" });
   assert.match((await checkVoice(settings)).problem ?? "", /No Google API key/);
   t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
-    assert.equal(url, "https://texttospeech.googleapis.com/v1/voices");
+    assert.equal(url, "https://texttospeech.googleapis.com/v1/voices?languageCode=en-US");
     const key = new Headers(init.headers).get("X-Goog-Api-Key");
     return key === "good-key" ? Response.json({ voices: [] }) : googleFailure(400, "INVALID_ARGUMENT", "API_KEY_INVALID");
   });
@@ -255,15 +255,16 @@ test("keys are checked with voice lookup, saved privately, and overridden by the
   assert.deepEqual(keyStatus(), { saved: false, source: "none" });
 });
 
-test("voice lookup only returns Chirp 3 HD and labels voices with their locale and gender", async (t) => {
+test("voice lookup only returns US English Chirp 3 HD voices in name order", async (t) => {
   const env = process.env;
   t.after(() => { process.env = env; });
   process.env = { PASEO_HOME: import.meta.dirname, GOOGLE_TTS_API_KEY: apiKey };
   t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
-    assert.equal(url, "https://texttospeech.googleapis.com/v1/voices");
+    assert.equal(url, "https://texttospeech.googleapis.com/v1/voices?languageCode=en-US");
     assert.equal(new Headers(init.headers).get("X-Goog-Api-Key"), apiKey);
     return Response.json({ voices: [
       { name: kore, languageCodes: ["en-US"], ssmlGender: "FEMALE", naturalSampleRateHertz: 24_000 },
+      { name: "en-GB-Chirp3-HD-Kore", languageCodes: ["en-GB"], ssmlGender: "FEMALE", naturalSampleRateHertz: 24_000 },
       { name: "en-US-Standard-A", languageCodes: ["en-US"], ssmlGender: "MALE", naturalSampleRateHertz: 24_000 },
       { name: charon, languageCodes: ["en-US"], ssmlGender: "MALE", naturalSampleRateHertz: 24_000 },
     ] });

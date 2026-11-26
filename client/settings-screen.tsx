@@ -16,7 +16,7 @@ import { useManagedStatus, useVoiceStatus, voiceStatusQueryKey } from "./voice-s
 
 const SPEEDS = [0.5, 0.75, 0.8, 0.9, 1, 1.1, 1.2, 1.25, 1.5, 1.75, 2].map((speed) => ({ value: String(speed), label: speed.toString() + "x" }));
 const KEY_QUERY = ["read-aloud", "google", "key"] as const;
-const VOICES_QUERY = ["read-aloud", "google", "voices"] as const;
+const VOICES_QUERY = ["read-aloud", "google", "voices", "en-US"] as const;
 
 type Theme = PluginSurfaceProps["theme"];
 type ReadyVoiceSettings = Extract<SettingsState<typeof voiceSettings.schema>, { status: "ready" }>;
@@ -47,14 +47,14 @@ function GoogleControls({ settings, theme, testAction }: { settings: ReadyVoiceS
     retry: false,
   });
   const values = settings.values.google;
-  const terms = search.trim().toLowerCase().split(/\s+/);
-  const matching = (voices.data?.voices ?? []).filter(({ id, name }) => {
-    const searchable = `${id} ${name}`.toLowerCase();
-    return terms.every((term) => searchable.includes(term));
-  });
-  const voiceOptions = matching.map(({ id, name }) => ({ value: id, label: name }));
-  const mainOptions = values.voiceName && !voiceOptions.some(({ value }) => value === values.voiceName)
-    ? [{ value: values.voiceName, label: values.voiceLabel || values.voiceName }, ...voiceOptions] : voiceOptions;
+  const available = voices.data?.voices ?? [];
+  const currentVoice = available.find(({ id }) => id === values.voiceName);
+  const searchText = search.trim().toLowerCase();
+  const matching = available.filter(({ name }) => name.toLowerCase().includes(searchText));
+  const toOption = ({ id, name }: (typeof available)[number]) => ({ value: id, label: name });
+  const voiceOptions = matching.map(toOption);
+  const mainOptions = currentVoice && !matching.includes(currentVoice)
+    ? [toOption(currentVoice), ...voiceOptions] : voiceOptions;
   const extraOptions = voiceOptions.filter(({ value }) =>
     value !== values.voiceName && !values.agentVoices.some(({ id }) => id === value));
   const edit = (patch: Partial<GoogleValues>) =>
@@ -121,8 +121,11 @@ function GoogleControls({ settings, theme, testAction }: { settings: ReadyVoiceS
       </SettingsSection>
       <SettingsSection title="Google Chirp 3 HD voice">
         <SettingsCard>
-          <SettingsInput label="Search voices" placeholder="Enter a name or language" disabled={unavailable} onChangeText={setSearch} />
-          <SettingsSelect label="Voice" value={values.voiceName} options={mainOptions}
+          {!currentVoice && values.voiceName ? (
+            <Message theme={theme} text={`Current voice: ${values.voiceLabel || values.voiceName}`} />
+          ) : null}
+          <SettingsInput label="Search by voice name" placeholder="Enter a name" disabled={unavailable} onChangeText={setSearch} />
+          <SettingsSelect label="Voice" value={currentVoice?.id ?? ""} options={mainOptions}
             hint={voiceLoading ? "Loading voices..." : !unavailable && !voices.isError && !matching.length ? "No matching voices" : undefined}
             disabled={unavailable || !matching.length} onValueChange={(voiceName) => {
               const voice = matching.find(({ id }) => id === voiceName);

@@ -77,11 +77,10 @@ const voiceList = z.object({
   voices: z.array(z.object({ name: z.string(), ssmlGender: z.string().optional() })).default([]),
 });
 
-const languageNames = new Intl.DisplayNames("en", { type: "language" });
-
 async function fetchVoiceList(apiKey: string) {
+  const locale = "en-US";
   const signal = AbortSignal.timeout(60_000);
-  const response = await fetchGoogle(() => fetch(`${GOOGLE_API}/voices`, {
+  const response = await fetchGoogle(() => fetch(`${GOOGLE_API}/voices?languageCode=${locale}`, {
     headers: { "X-Goog-Api-Key": apiKey },
     // This is Node's fetch, despite React Native's global declarations.
     signal: signal as RequestInit["signal"],
@@ -90,11 +89,10 @@ async function fetchVoiceList(apiKey: string) {
   if (!result.success) throw new Error("Google returned an invalid voice list.");
   return result.data.voices.flatMap(({ name: id, ssmlGender }) => {
     const match = GOOGLE_VOICE_NAME.exec(id);
-    if (!match) return [];
-    const [, code, name] = match;
-    const language = code === "en-US" ? "US English" : languageNames.of(code) ?? code;
+    if (!match || match[1] !== locale) return [];
+    const [, , name] = match;
     const gender = ssmlGender && ssmlGender !== "SSML_VOICE_GENDER_UNSPECIFIED" ? `, ${ssmlGender.toLowerCase()}` : "";
-    return [{ id, name: `${name} (${language}${gender})` }];
+    return [{ id, name: `${name} (US English${gender})` }];
   }).sort((a, b) => a.name.localeCompare(b.name));
 }
 
