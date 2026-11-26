@@ -46,17 +46,20 @@ the voice and speed to Google's defaults. Set up a Google key before using direc
 
 ## Central voice on a managed host
 
-Open **Settings > Plugins > Read Aloud**. Select **Central voice** and choose an approved voice.
+Open **Settings > Plugins > Read Aloud** and select **Central voice**. Search by name, pick an
+approved Google Chirp 3 HD voice, and choose a **Speed**. The default is 1×. Other speeds
+require FFmpeg with the `atempo` filter on the Paseo host. If FFmpeg is unavailable, choose 1×.
 You don't need a Google key. If the service rejects your selected voice or **Refresh** finds
-that it was removed, the picker clears it. If Central voice can't play, select **Paseo voice
-settings (local)** and use a downloaded voice from **Settings > Voice**.
+that it was removed, the picker clears it. You can switch to **Paseo voice settings (local)**
+and use a downloaded voice from **Settings > Voice**.
 
-Managed Read Aloud plays on demand. During the pilot, press the speaker under a reply that
-says only “The blue notebook is on the shelf.” The plugin keeps other replies on your host.
-Automatic reading and **Test voice** are unavailable. Paseo's separate Voice mode uses its own
-local speaking and listening settings in the pilot. When Read Aloud first checks its status, it
-disconnects any Speaking setting that still points to the old Read Aloud bridge. If it can't
-restore the previous setting, Read Aloud settings shows a warning.
+Under **Test voice**, press **Play** to hear “The blue notebook is on the shelf.” You can also
+press the speaker under a reply that says only that sentence. Both use your saved speed and
+count against the monthly limits for your login and company. Refresh uses no speech characters.
+The plugin keeps other replies on your host and does not read automatically. The separate Paseo
+Voice mode uses its own local speaking and listening settings. If Read Aloud finds the old
+Speaking connection to its personal bridge, it attempts to restore the previous setting and
+shows a warning if it can't confirm the restore.
 
 Your administrator sets up the private service. See the [hub protocol](shared/hub-protocol-v1.json)
 for the required host files and credential helper.

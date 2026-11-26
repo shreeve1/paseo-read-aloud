@@ -6,6 +6,7 @@ import { cancelSpeech, synthesizeSpeech, voiceStatus, type SpeechFile, type Spee
 import protocol from "./shared/hub-protocol-v1.json" with { type: "json" };
 import { voiceModeConnect, voiceModeStatus } from "./shared/voice-mode";
 import { HubError, loadMode, withLocalOption, type Mode } from "./server/managed";
+import { isManagedSpeedAvailable, SPEED_UNAVAILABLE } from "./server/managed-speed";
 import { addReadAloudRow } from "./server/reply-row";
 import { startSpeechBridge } from "./server/speech-bridge";
 import { cancel, checkVoice, disposeEngine, synthesize, synthesizeManaged } from "./server/tts";
@@ -81,7 +82,7 @@ function registerManaged(server: PluginServerContext, mode: Exclude<Mode, { kind
       }
       if (rejected.has(settings.managed)) throw new HubError("voice_not_allowed");
       try {
-        return await synthesizeManaged(mode.hub, settings.managed.voiceId, input);
+        return await synthesizeManaged(mode.hub, settings.managed, input);
       } catch (error) {
         if (error instanceof HubError && error.code === "voice_not_allowed") rejected.add(settings.managed);
         throw error;
@@ -113,12 +114,13 @@ export function registerReadAloud(server: PluginServerContext, mode: Mode) {
     });
   }
 
+  const speedAvailable = mode.kind === "managed" ? isManagedSpeedAvailable() : undefined;
   server.handle(managedStatus, async (_input, context): Promise<ManagedStatus> => {
     if (mode.kind === "personal") return { mode: mode.kind };
     const speakingProblem = await checkSpeaking(context);
     return mode.kind === "managed-unavailable"
       ? { mode: mode.kind, reason: mode.reason, speakingProblem }
-      : { mode: mode.kind, speakingProblem };
+      : { mode: mode.kind, speakingProblem, speedProblem: await speedAvailable ? undefined : SPEED_UNAVAILABLE };
   });
   server.handle(synthesizeSpeech, async (input) => handlers.synthesize(input, await getSettings()));
   server.handle(cancelSpeech, cancel);

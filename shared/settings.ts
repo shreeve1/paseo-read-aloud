@@ -5,6 +5,10 @@ import { DEFAULT_GOOGLE_VOICE } from "./google";
 // Only used to recognize the retired direct provider in version-1 settings.
 const legacyDirectProvider = "ele" + "venlabs";
 
+export const VOICE_SPEEDS = [0.5, 0.75, 0.8, 0.9, 1, 1.1, 1.2, 1.25, 1.5, 1.75, 2] as const;
+export const managedSpeed = z.literal(VOICE_SPEEDS);
+export type ManagedSpeed = z.output<typeof managedSpeed>;
+
 export const voiceSettings = defineSettings({
   id: "voice",
   scope: "host",
@@ -14,6 +18,7 @@ export const voiceSettings = defineSettings({
     managed: z.object({
       voiceId: z.string().default(""),
       voiceName: z.string().default(""),
+      speed: managedSpeed.default(1),
     }).prefault({}),
     google: z.object({
       voiceName: z.string().default(DEFAULT_GOOGLE_VOICE),

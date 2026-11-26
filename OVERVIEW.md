@@ -48,21 +48,21 @@ Paseo plays the audio on the device that starts playback.
 
 ## Managed hosts
 
-**Central voice** uses a private speech service. Select a voice from the approved
-list in Read Aloud settings. The picker clears a saved voice if the service
-rejects it or a refreshed list no longer includes it. If the service can't play
-the reply, Read Aloud explains why.
-Switch to **Paseo voice settings (local)** to use a downloaded voice instead.
+**Central voice** uses a private speech service. In Read Aloud settings, search
+for an approved Google Chirp 3 HD voice by name, pick a voice, and set its speed.
+Other speeds besides 1× require FFmpeg with the `atempo` filter on the Paseo host.
+If the service removes your voice, choose another approved voice or switch to
+**Paseo voice settings (local)** to use a downloaded voice.
 
-Managed Read Aloud plays only when you press the speaker. For the pilot, use a
-reply that says exactly “The blue notebook is on the shelf.” The plugin checks
-the cleaned reply locally before making a speech request. Managed hosts don't
-show **Test voice**, automatic reading, API key controls, or the switch that
-connects Read Aloud to Paseo Voice mode. The pilot keeps Voice mode speaking and
-listening local. On its first status check in managed mode, the plugin looks
-for a leftover Speaking connection to the personal bridge and restores the
-previous setting without opening the bridge. Read Aloud settings shows a
-warning if it can't confirm the restore.
+Press **Test voice > Play** to hear “The blue notebook is on the shelf.” During
+the pilot, you can also press the speaker under a reply that says only that
+sentence. Both use your saved speed and count toward your login and company
+speech limits. Refreshing voices uses no speech characters. The plugin checks
+replies locally before making a speech request. The managed service keeps the
+Google key, and Paseo's separate Voice mode keeps speaking and listening local.
+If a Speaking setting still points to the personal bridge, Read Aloud attempts
+to restore the previous setting and shows a warning if it can't confirm the
+restore.
 
 The server selects its mode at startup. Without a managed configuration file it
 uses personal mode. When the file is present, the configuration, CA certificate,

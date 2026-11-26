@@ -1,17 +1,19 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { Server } from "node:net";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { createVoicePreview } from "../client/voice-preview";
 import { createPlayer } from "../client/player";
 import { registerReadAloud } from "../index.server";
 import type { Mode } from "../server/managed";
 import { bridgePort } from "../server/speech-bridge";
 import protocol from "../shared/hub-protocol-v1.json" with { type: "json" };
 import { managedStatus, managedVoices } from "../shared/managed";
-import { voiceSettings, type VoiceSettings } from "../shared/settings";
+import { voiceSettings, type ManagedSpeed, type VoiceSettings } from "../shared/settings";
 import { cancelSpeech, synthesizeSpeech, voiceStatus, type SpeechFile } from "../shared/speech";
 import { voiceModeStatus } from "../shared/voice-mode";
 import { mockHub } from "./managed-fixture";
@@ -47,6 +49,10 @@ function plugin(t: TestContext, mode: Mode, provider: VoiceSettings["provider"],
     },
     changeProvider(provider: VoiceSettings["provider"]) {
       state = { ...state, values: { ...state.values, provider } };
+      listener(state);
+    },
+    changeSpeed(speed: ManagedSpeed) {
+      state = { ...state, values: { ...state.values, managed: { ...state.values.managed, speed } } };
       listener(state);
     },
   };
@@ -243,6 +249,66 @@ test("approved voices and realistic hub PCM reach the Paseo RPC as playable WAV;
   assert.equal(status.ok, false);
   assert.equal(status.unavailableVoiceId, "one");
   assert.match(status.problem ?? "", /That voice is no longer available/);
+  const beforeRetry = requests.length;
+  await assert.rejects(server.call(synthesizeSpeech.name, { text, manual: true }), /That voice is no longer available/);
+  assert.equal(requests.length, beforeRetry);
   assert.deepEqual(await server.call(managedVoices.name), { voices: [] });
   assert.equal(fetch.mock.callCount(), 0);
+});
+
+test("Settings preview and the chat speaker use the saved speed and preserve pitch", {
+  skip: spawnSync("ffmpeg", ["-version"]).status === 0 ? false : "FFmpeg is not installed",
+}, async (t) => {
+  const pcm = Buffer.alloc(24_000 * 2);
+  for (let i = 0; i < 24_000; i++) pcm.writeInt16LE(Math.round(8000 * Math.sin(2 * Math.PI * 440 * i / 24_000)), i * 2);
+  const { mode, requests } = await mockHub(t, (_request, response) => {
+    response.writeHead(200, { "Content-Type": "application/octet-stream", "X-Audio-Format": "pcm_s16le_24000_mono" })
+      .end(pcm);
+  });
+  const server = plugin(t, mode, "managed");
+  const speak = async (input: object) => synthesizeSpeech.output.parse(await server.call(synthesizeSpeech.name, input));
+  const played: SpeechFile[] = [];
+  const playAudio = async (audio: SpeechFile) => { played.push(audio); };
+  const preview = createVoicePreview();
+  const player = createPlayer({
+    speak, playAudio,
+    cancel: (session) => server.call(cancelSpeech.name, { session }),
+  });
+  server.changeSpeed(1.5);
+  await preview.play({ mode: "managed", speak, playAudio });
+  await player.play("fixture", text, (error) => assert.fail(String(error)), undefined, false);
+  server.changeSpeed(0.5);
+  await preview.play({ mode: "managed", speak, playAudio });
+
+  assert.equal(played.length, 3);
+  assert.deepEqual(played[0], played[1]);
+  for (const [clip, expectedDuration] of [[played[0], 1000 / 1.5], [played[2], 2000]] as const) {
+    assert.equal(clip.mimeType, "audio/wav");
+    assert.ok(clip.durationMs && Math.abs(clip.durationMs - expectedDuration) < 60);
+    const wav = Buffer.from(clip.base64, "base64");
+    let cycles = 0;
+    for (let offset = 46; offset < wav.length; offset += 2) {
+      if (wav.readInt16LE(offset - 2) <= 0 && wav.readInt16LE(offset) > 0) cycles++;
+    }
+    assert.ok(Math.abs(cycles / (clip.durationMs / 1000) - 440) < 5);
+  }
+  assert.deepEqual(requests.map(({ body }) => JSON.parse(body)), Array(3).fill({ voice_id: "one", text }));
+});
+
+test("a missing FFmpeg blocks non-1x speech before calling the hub and still allows 1x", async (t) => {
+  const { mode, requests } = await mockHub(t, (_request, response) => {
+    response.writeHead(200, { "Content-Type": "application/octet-stream", "X-Audio-Format": "pcm_s16le_24000_mono" })
+      .end(Buffer.from([0, 0]));
+  });
+  overrideEnv(t, "PATH", "");
+  const server = plugin(t, mode, "managed");
+  const status = managedStatus.output.parse(await server.call(managedStatus.name));
+  assert.equal(status.mode, "managed");
+  assert.match(status.speedProblem ?? "", /FFmpeg.*Choose 1x/);
+  server.changeSpeed(2);
+  await assert.rejects(server.call(synthesizeSpeech.name, { text, manual: true }), /FFmpeg.*Choose 1x/);
+  assert.deepEqual(requests, []);
+  server.changeSpeed(1);
+  assert.equal(synthesizeSpeech.output.parse(await server.call(synthesizeSpeech.name, { text, manual: true })).mimeType, "audio/wav");
+  assert.equal(requests.length, 1);
 });

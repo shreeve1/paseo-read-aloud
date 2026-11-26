@@ -3,18 +3,19 @@ import {
   SettingsAction, SettingsCard, SettingsInput, SettingsSection, SettingsSelect, SettingsSwitch, type SettingsInputHandle,
 } from "@getpaseo/plugin/client/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Text } from "react-native";
-import { googleClearKey, googleKeyStatus, googleSaveKey, googleVoices } from "../shared/google";
 import protocol from "../shared/hub-protocol-v1.json" with { type: "json" };
-import { DIRECT_VOICE_UNAVAILABLE, managedVoices, type ManagedStatus } from "../shared/managed";
-import { deviceSettings, voiceSettings, type VoiceSettings } from "../shared/settings";
+import { googleClearKey, googleKeyStatus, googleSaveKey, googleVoices } from "../shared/google";
+import { DIRECT_VOICE_UNAVAILABLE, managedVoices } from "../shared/managed";
+import { deviceSettings, managedSpeed, VOICE_SPEEDS, voiceSettings, type VoiceSettings } from "../shared/settings";
 import { synthesizeSpeech } from "../shared/speech";
 import { voiceModeConnect, voiceModeStatus } from "../shared/voice-mode";
-import { canTestVoice, reconcileManagedVoice, voiceSources } from "./managed-settings";
+import { reconcileManagedVoice, voicePickerOptions, voiceSources } from "./managed-settings";
+import { createVoicePreview } from "./voice-preview";
 import { useManagedStatus, useVoiceStatus, voiceStatusQueryKey } from "./voice-status";
 
-const SPEEDS = [0.5, 0.75, 0.8, 0.9, 1, 1.1, 1.2, 1.25, 1.5, 1.75, 2].map((speed) => ({ value: String(speed), label: speed.toString() + "x" }));
+const SPEEDS = VOICE_SPEEDS.map((speed) => ({ value: String(speed), label: speed + "x" }));
 const KEY_QUERY = ["read-aloud", "google", "key"] as const;
 const VOICES_QUERY = ["read-aloud", "google", "voices", "en-US"] as const;
 
@@ -49,14 +50,10 @@ function GoogleControls({ settings, theme, testAction }: { settings: ReadyVoiceS
   const values = settings.values.google;
   const available = voices.data?.voices ?? [];
   const currentVoice = available.find(({ id }) => id === values.voiceName);
-  const searchText = search.trim().toLowerCase();
-  const matching = available.filter(({ name }) => name.toLowerCase().includes(searchText));
-  const toOption = ({ id, name }: (typeof available)[number]) => ({ value: id, label: name });
-  const voiceOptions = matching.map(toOption);
-  const mainOptions = currentVoice && !matching.includes(currentVoice)
-    ? [toOption(currentVoice), ...voiceOptions] : voiceOptions;
-  const extraOptions = voiceOptions.filter(({ value }) =>
-    value !== values.voiceName && !values.agentVoices.some(({ id }) => id === value));
+  const { matching, options: mainOptions } = voicePickerOptions(available, values.voiceName, search);
+  const extraOptions = matching.filter(({ id }) =>
+    id !== values.voiceName && !values.agentVoices.some((voice) => voice.id === id))
+    .map(({ id, name }) => ({ value: id, label: name }));
   const edit = (patch: Partial<GoogleValues>) =>
     settings.save({ ...settings.values, google: { ...values, ...patch } }, settings.revision);
 
@@ -233,10 +230,13 @@ function DeviceControls({ theme }: { theme: Theme }) {
   );
 }
 
-function ManagedVoicePicker({ hostId, settings, theme }: {
-  hostId: string; settings: ReadyVoiceSettings; theme: Theme;
+function ManagedVoiceControls({ hostId, settings, theme, speedProblem, testing, testAction, resetTest }: {
+  hostId: string; settings: ReadyVoiceSettings; theme: Theme; speedProblem?: string; testing: boolean;
+  testAction: (disabled: boolean) => ReactNode; resetTest: () => void;
 }) {
   const getVoices = useRpc(managedVoices);
+  const [search, setSearch] = useState("");
+  const [voiceRemoved, setVoiceRemoved] = useState(false);
   const voices = useQuery({
     queryKey: ["read-aloud", "managed.voices", hostId],
     queryFn: () => getVoices({}),
@@ -250,74 +250,83 @@ function ManagedVoicePicker({ hostId, settings, theme }: {
     : undefined;
   const saved = settings.values.managed;
   const selection = reconcileManagedVoice(saved, available, unavailableVoiceId);
+  const removed = Boolean(saved.voiceId && !selection.voiceId);
+  const { matching, options } = voicePickerOptions(available ?? [], selection.voiceId, search);
+  const busy = testing || settings.saving;
+  const speedUnavailable = Boolean(speedProblem && selection.speed !== 1);
+  const save = (managed: VoiceSettings["managed"]) =>
+    settings.save({ ...settings.values, managed }, settings.revision);
 
   useEffect(() => {
     if (selection !== saved && (!voices.isFetching || saved.voiceId === unavailableVoiceId) &&
         !settings.saving && !settings.saveError) {
+      if (removed) setVoiceRemoved(true);
       void settings.save({ ...settings.values, managed: selection }, settings.revision);
     }
-  }, [saved, selection, settings, unavailableVoiceId, voices.isFetching]);
+  }, [removed, saved, selection, settings, unavailableVoiceId, voices.isFetching]);
+
+  const voiceHint = voices.isFetching && !available ? "Loading voices..."
+    : available?.length === 0 ? "No approved voices are available"
+    : available && !matching.length ? "No matching voices" : undefined;
 
   return (
-    <SettingsCard>
-      <SettingsSelect label="Voice" value={selection.voiceId}
-        options={(available ?? []).map(({ id, name }) => ({ value: id, label: name }))}
-        hint={voices.isFetching && !available ? "Loading voices..." : available?.length === 0 ? "No approved voices are available" : undefined}
-        disabled={settings.saving || voices.isFetching || !available?.length}
-        onValueChange={(voiceId) => {
-          const voice = available?.find(({ id }) => id === voiceId);
-          if (voice) void settings.save({
-            ...settings.values, managed: { voiceId: voice.id, voiceName: voice.name },
-          }, settings.revision);
-        }} />
-      <SettingsAction label="Approved voices" actionLabel={voices.isFetching ? "Refreshing..." : "Refresh"}
-        disabled={voices.isFetching} onPress={() => void voices.refetch()} />
-      {voices.isError ? <Message theme={theme} text={voices.error.message} error /> : null}
-    </SettingsCard>
-  );
-}
-
-function ManagedVoiceControls({ status, hostId, settings, theme }: {
-  status: Exclude<ManagedStatus, { mode: "personal" }>; hostId: string; settings: ReadyVoiceSettings; theme: Theme;
-}) {
-  return (
-    <SettingsSection title="Central voice">
-      {status.mode === "managed-unavailable" ? <Message theme={theme} text={status.reason} error /> : (
-        <>
-          <ManagedVoicePicker hostId={hostId} settings={settings} theme={theme} />
-          <Message theme={theme} text={`For the pilot, press the speaker under a reply that says “${protocol.pilot.fixture_text}”`} />
-        </>
-      )}
+    <SettingsSection title="Google Chirp 3 HD via Central voice">
+      <SettingsCard>
+        <SettingsInput label="Search by voice name" placeholder="Enter a name" disabled={!available?.length}
+          onChangeText={setSearch} />
+        <SettingsSelect label="Voice" value={available ? selection.voiceId : ""} options={options}
+          hint={voiceHint} disabled={busy || voices.isFetching || !matching.length}
+          onValueChange={(voiceId) => {
+            const voice = matching.find(({ id }) => id === voiceId);
+            if (!voice) return;
+            setVoiceRemoved(false);
+            resetTest();
+            void save({ ...selection, voiceId: voice.id, voiceName: voice.name });
+          }} />
+        <SettingsAction label="Approved voices" actionLabel={voices.isFetching ? "Refreshing..." : "Refresh"}
+          disabled={voices.isFetching} onPress={() => void voices.refetch()} />
+        {voices.isError ? <Message theme={theme} text={voices.error.message} error /> : null}
+        {voiceRemoved || removed ? <Message theme={theme} text="That voice is no longer available. Choose another approved voice." /> : null}
+        <SettingsSelect label="Speed" value={speedUnavailable ? "" : String(selection.speed)}
+          options={speedProblem ? SPEEDS.filter(({ value }) => value === "1") : SPEEDS} disabled={busy}
+          onValueChange={(value) => {
+            const speed = managedSpeed.safeParse(Number(value));
+            if (!speed.success || (speedProblem && speed.data !== 1)) return;
+            resetTest();
+            void save({ ...selection, speed: speed.data });
+          }} />
+        {speedProblem ? <Message theme={theme} text={speedProblem} /> : null}
+        {testAction(busy || voices.isFetching || !selection.voiceId || !available || speedUnavailable)}
+      </SettingsCard>
     </SettingsSection>
   );
 }
 
 export function createVoiceSettingsScreen(client: PluginClientContext) {
+  const preview = createVoicePreview();
   return function VoiceSettingsScreen({ theme, host }: PluginSurfaceProps) {
     const settings = useSettings(voiceSettings);
     const mode = useManagedStatus(host.id);
     const status = mode.isSuccess && mode.isFetchedAfterMount ? mode.data : undefined;
     const speak = useRpc(synthesizeSpeech);
-    const [testing, setTesting] = useState(false);
-    const [testError, setTestError] = useState("");
+    const queryClient = useQueryClient();
+    const state = useSyncExternalStore(preview.subscribe, preview.getSnapshot, preview.getSnapshot);
+    const testing = state.status === "playing";
 
-    async function testVoice() {
-      setTesting(true);
-      setTestError("");
-      try {
-        const audio = await speak({ text: "Hello. This is how your Read Aloud voice sounds." });
-        await client.playAudio(audio);
-      } catch (error) {
-        setTestError(error instanceof Error ? error.message : "Could not play the test voice.");
-      } finally {
-        setTesting(false);
-      }
+    function testAction(mode: "managed" | "personal", disabled: boolean) {
+      return <SettingsAction label="Test voice" actionLabel={testing ? "Testing..." : "Play"}
+        disabled={disabled || testing}
+        hint={mode === "managed" ? `Plays “${protocol.pilot.fixture_text}”` : undefined}
+        error={state.status === "error" ? state.message : undefined}
+        onPress={async () => {
+          if (disabled) return;
+          const result = await preview.play({ mode, speak, playAudio: (audio) => client.playAudio(audio) });
+          if (result === "failed" && mode === "managed") {
+            void queryClient.invalidateQueries({ queryKey: [...voiceStatusQueryKey, host.id] });
+          }
+        }} />;
     }
 
-    const testAction = canTestVoice(status?.mode) ? (
-      <SettingsAction label="Test voice" actionLabel={testing ? "Testing..." : "Play"}
-        disabled={testing || settings.saving} error={testError || undefined} onPress={() => void testVoice()} />
-    ) : null;
     const personal = status?.mode === "personal";
     const provider = settings.status === "ready" ? settings.values.provider : undefined;
     const options = status ? voiceSources(status.mode) : [];
@@ -337,9 +346,9 @@ export function createVoiceSettingsScreen(client: PluginClientContext) {
           ) : settings.status === "ready" ? (
             <SettingsCard>
               <SettingsSelect label="Voice source" value={selected ?? ""} options={options}
-                disabled={settings.saving} onValueChange={(provider) => {
+                disabled={settings.saving || testing} onValueChange={(provider) => {
                   if (!provider) return;
-                  setTestError("");
+                  preview.reset();
                   void settings.save({ ...settings.values, provider }, settings.revision);
                 }} />
               {!selected && provider === "google" ? <Message theme={theme} text={DIRECT_VOICE_UNAVAILABLE} /> : null}
@@ -365,13 +374,20 @@ export function createVoiceSettingsScreen(client: PluginClientContext) {
         {status && status.mode !== "personal" && status.speakingProblem ? (
           <Message theme={theme} text={status.speakingProblem} error />
         ) : null}
-        {google ? <GoogleControls settings={settings} theme={theme} testAction={testAction} /> : null}
+        {google ? <GoogleControls settings={settings} theme={theme} testAction={testAction("personal", settings.saving)} /> : null}
         {status && status.mode !== "personal" && settings.status === "ready" && provider === "managed" ? (
-          <ManagedVoiceControls status={status} hostId={host.id} settings={settings} theme={theme} />
+          status.mode === "managed" ? (
+            <ManagedVoiceControls hostId={host.id} settings={settings} theme={theme} speedProblem={status.speedProblem}
+              testing={testing} testAction={(disabled) => testAction("managed", disabled)} resetTest={preview.reset} />
+          ) : (
+            <SettingsSection title="Google Chirp 3 HD via Central voice">
+              <Message theme={theme} text={status.reason} error />
+            </SettingsSection>
+          )
         ) : null}
-        {testAction && settings.status === "ready" && provider === "paseo" ? (
+        {personal && settings.status === "ready" && provider === "paseo" ? (
           <SettingsSection title="Preview">
-            <SettingsCard>{testAction}</SettingsCard>
+            <SettingsCard>{testAction("personal", settings.saving)}</SettingsCard>
           </SettingsSection>
         ) : null}
         {personal ? <DeviceControls theme={theme} /> : null}

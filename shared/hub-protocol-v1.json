@@ -66,7 +66,7 @@
     "fixture_text": "The blue notebook is on the shelf.",
     "fixture_rule": "In fixture_only mode the hub accepts text equal to fixture_text byte for byte and nothing else.",
     "automatic_reading": false,
-    "test_voice_action": false
+    "test_voice_action": true
   },
   "limits": {
     "max_request_bytes": 4096,

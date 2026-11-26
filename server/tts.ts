@@ -9,6 +9,7 @@ import type { VoiceSettings } from "../shared/settings";
 import type { SpeechFile, SpeechRequest, VoiceStatus } from "../shared/speech";
 import { GOOGLE_API, GOOGLE_SETTINGS, GoogleSpeechError, fetchGoogle } from "./google";
 import type { HubClient } from "./managed";
+import { adjustManagedSpeed, isManagedSpeedAvailable, SPEED_UNAVAILABLE } from "./managed-speed";
 import { readDaemonConfig, requiredFiles, resolveVoice, type ResolvedVoice, type TtsEngine } from "./voices";
 
 type LocalVoice = Extract<ResolvedVoice, { provider: "local" }>;
@@ -452,11 +453,14 @@ function wavClip(audio: Buffer): SpeechFile {
 }
 
 export async function synthesizeManaged(
-  hub: HubClient, voiceId: string, { text, session }: SpeechRequest,
+  hub: HubClient, { voiceId, speed }: VoiceSettings["managed"], { text, session }: SpeechRequest,
 ): Promise<SpeechFile> {
   if (isCancelled(session)) throw new Cancelled();
-  return withSpeechRequest("Central voice", session, async (signal) =>
-    pcm16Clip(await hub.synthesize(voiceId, text, signal)));
+  return withSpeechRequest("Central voice", session, async (signal) => {
+    if (speed !== 1 && !(await isManagedSpeedAvailable(signal))) throw new Error(SPEED_UNAVAILABLE);
+    const pcm = await hub.synthesize(voiceId, text, signal);
+    return pcm16Clip(await adjustManagedSpeed(pcm, speed, signal));
+  });
 }
 
 async function synthesizeLocal(voice: LocalVoice, text: string, session?: string): Promise<SpeechFile> {

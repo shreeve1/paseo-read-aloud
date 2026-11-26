@@ -32,7 +32,7 @@ test("version 1 settings migrate James's saved selection to Google defaults", as
   const migrated = await voiceSettings.migrate(stored.values, stored.version);
   assert.deepEqual(voiceSettings.schema.parse(migrated), {
     provider: "google",
-    managed: { voiceId: "", voiceName: "" },
+    managed: { voiceId: "", voiceName: "", speed: 1 },
     google: { voiceName: charon, voiceLabel: "Charon", speed: 1, agentVoices: [] },
   });
   for (const provider of ["paseo", "managed"]) {
@@ -40,7 +40,7 @@ test("version 1 settings migrate James's saved selection to Google defaults", as
     const values = await voiceSettings.migrate({ ...stored.values, provider, managed }, stored.version);
     const parsed = voiceSettings.schema.parse(values);
     assert.equal(parsed.provider, provider);
-    assert.deepEqual(parsed.managed, managed);
+    assert.deepEqual(parsed.managed, { ...managed, speed: 1 });
   }
 });
 
