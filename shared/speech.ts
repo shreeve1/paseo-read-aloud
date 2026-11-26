@@ -40,7 +40,7 @@ export const voiceStatus = defineRpc({
   output: z.object({
     ok: z.boolean(),
     voice: z.string(),
-    provider: z.enum(["local", "openai", "elevenlabs", "managed", "unknown"]).optional(),
+    provider: z.enum(["local", "openai", "google", "managed", "unknown"]).optional(),
     problem: z.string().optional(),
     unavailableVoiceId: z.string().optional(),
     speakingProblem: z.string().optional(),

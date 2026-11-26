@@ -5,7 +5,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Text } from "react-native";
-import { elevenLabsClearKey, elevenLabsKeyStatus, elevenLabsSaveKey, elevenLabsVoices } from "../shared/elevenlabs";
+import { googleClearKey, googleKeyStatus, googleSaveKey, googleVoices } from "../shared/google";
 import protocol from "../shared/hub-protocol-v1.json" with { type: "json" };
 import { DIRECT_VOICE_UNAVAILABLE, managedVoices, type ManagedStatus } from "../shared/managed";
 import { deviceSettings, voiceSettings, type VoiceSettings } from "../shared/settings";
@@ -14,58 +14,51 @@ import { voiceModeConnect, voiceModeStatus } from "../shared/voice-mode";
 import { canTestVoice, reconcileManagedVoice, voiceSources } from "./managed-settings";
 import { useManagedStatus, useVoiceStatus, voiceStatusQueryKey } from "./voice-status";
 
-const MODELS = [
-  { value: "eleven_flash_v2_5", label: "Flash v2.5 (fast, low cost)" },
-  { value: "eleven_multilingual_v2", label: "Multilingual v2" },
-  { value: "eleven_v4_turbo", label: "v4 Turbo" },
-  { value: "eleven_v4", label: "v4" },
-  { value: "eleven_v3", label: "v3" },
-];
-const SPEEDS = [0.8, 0.9, 1, 1.1, 1.2].map((speed) => ({ value: String(speed), label: speed.toFixed(1) + "x" }));
-const KEY_QUERY = ["read-aloud", "elevenlabs", "key"] as const;
-const VOICES_QUERY = ["read-aloud", "elevenlabs", "voices"] as const;
+const SPEEDS = [0.5, 0.75, 0.8, 0.9, 1, 1.1, 1.2, 1.25, 1.5, 1.75, 2].map((speed) => ({ value: String(speed), label: speed.toString() + "x" }));
+const KEY_QUERY = ["read-aloud", "google", "key"] as const;
+const VOICES_QUERY = ["read-aloud", "google", "voices"] as const;
 
 type Theme = PluginSurfaceProps["theme"];
 type ReadyVoiceSettings = Extract<SettingsState<typeof voiceSettings.schema>, { status: "ready" }>;
-type ElevenLabsValues = VoiceSettings["elevenlabs"];
+type GoogleValues = VoiceSettings["google"];
 
 function Message({ theme, text, error = false }: { theme: Theme; text: string; error?: boolean }) {
   return <Text accessibilityRole={error ? "alert" : undefined}
     style={{ color: error ? theme.colors.statusDanger : theme.colors.foregroundMuted }}>{text}</Text>;
 }
 
-function ElevenLabsControls({ settings, theme, testAction }: { settings: ReadyVoiceSettings; theme: Theme; testAction: ReactNode }) {
-  const getKey = useRpc(elevenLabsKeyStatus);
-  const saveKey = useRpc(elevenLabsSaveKey);
-  const clearKey = useRpc(elevenLabsClearKey);
-  const getVoices = useRpc(elevenLabsVoices);
+function GoogleControls({ settings, theme, testAction }: { settings: ReadyVoiceSettings; theme: Theme; testAction: ReactNode }) {
+  const getKey = useRpc(googleKeyStatus);
+  const saveKey = useRpc(googleSaveKey);
+  const clearKey = useRpc(googleClearKey);
+  const getVoices = useRpc(googleVoices);
   const queryClient = useQueryClient();
   const keyInput = useRef<SettingsInputHandle>(null);
   const [hasDraft, setHasDraft] = useState(false);
   const [keyBusy, setKeyBusy] = useState(false);
   const [keyError, setKeyError] = useState("");
   const [search, setSearch] = useState("");
-  const [voiceSearch, setVoiceSearch] = useState("");
-  useEffect(() => {
-    const timer = setTimeout(() => setVoiceSearch(search.trim().slice(0, 200)), 250);
-    return () => clearTimeout(timer);
-  }, [search]);
 
   const key = useQuery({ queryKey: KEY_QUERY, queryFn: () => getKey({}), retry: false });
   const voices = useQuery({
-    queryKey: [...VOICES_QUERY, voiceSearch],
-    queryFn: () => getVoices({ search: voiceSearch || undefined }),
+    queryKey: VOICES_QUERY,
+    queryFn: () => getVoices({}),
     enabled: key.data?.saved === true,
     retry: false,
   });
-  const values = settings.values.elevenlabs;
-  const account = voices.data?.voices ?? [];
-  const options = account.map(({ id, name }) => ({ value: id, label: name }));
-  if (values.voiceId && !options.some(({ value }) => value === values.voiceId)) {
-    options.unshift({ value: values.voiceId, label: values.voiceName || values.voiceId });
-  }
-  const edit = (patch: Partial<ElevenLabsValues>) =>
-    settings.save({ ...settings.values, elevenlabs: { ...values, ...patch } }, settings.revision);
+  const values = settings.values.google;
+  const terms = search.trim().toLowerCase().split(/\s+/);
+  const matching = (voices.data?.voices ?? []).filter(({ id, name }) => {
+    const searchable = `${id} ${name}`.toLowerCase();
+    return terms.every((term) => searchable.includes(term));
+  });
+  const voiceOptions = matching.map(({ id, name }) => ({ value: id, label: name }));
+  const mainOptions = values.voiceName && !voiceOptions.some(({ value }) => value === values.voiceName)
+    ? [{ value: values.voiceName, label: values.voiceLabel || values.voiceName }, ...voiceOptions] : voiceOptions;
+  const extraOptions = voiceOptions.filter(({ value }) =>
+    value !== values.voiceName && !values.agentVoices.some(({ id }) => id === value));
+  const edit = (patch: Partial<GoogleValues>) =>
+    settings.save({ ...settings.values, google: { ...values, ...patch } }, settings.revision);
 
   async function changeKey(remove: boolean) {
     const apiKey = keyInput.current?.getText().trim();
@@ -96,7 +89,7 @@ function ElevenLabsControls({ settings, theme, testAction }: { settings: ReadyVo
   const keySource = key.data?.source;
   const keyLabel = key.isPending ? "Checking for an API key..."
     : key.isError ? "Could not check the API key"
-    : keySource === "env" ? "Provided by ELEVENLABS_API_KEY on this host"
+    : keySource === "env" ? "Provided by GOOGLE_TTS_API_KEY on this host"
     : keySource === "file" ? "API key saved on this host" : "No API key saved";
   const hasKey = key.data?.saved === true;
   const unavailable = settings.saving || keyBusy || !hasKey;
@@ -105,7 +98,7 @@ function ElevenLabsControls({ settings, theme, testAction }: { settings: ReadyVo
 
   return (
     <>
-      <SettingsSection title="ElevenLabs API key">
+      <SettingsSection title="Google API key">
         <SettingsCard>
           {key.isError ? (
             <SettingsAction label={keyLabel} actionLabel="Retry" onPress={() => void key.refetch()} />
@@ -126,40 +119,42 @@ function ElevenLabsControls({ settings, theme, testAction }: { settings: ReadyVo
         </SettingsCard>
         {keyError ? <Message theme={theme} text={keyError} error /> : null}
       </SettingsSection>
-      <SettingsSection title="ElevenLabs voice">
+      <SettingsSection title="Google Chirp 3 HD voice">
         <SettingsCard>
-          <SettingsInput label="Search voices" placeholder="Enter a voice name" disabled={unavailable} onChangeText={setSearch} />
-          <SettingsSelect label="Voice" value={values.voiceId} options={options}
-            hint={voiceLoading ? "Loading voices..." : !unavailable && !voices.isError && !account.length ? "No matching voices" : undefined}
-            disabled={unavailable || !account.length} onValueChange={(voiceId) => {
-              const voice = account.find(({ id }) => id === voiceId);
-              if (voice) void edit({ voiceId, voiceName: voice.name, agentVoices: values.agentVoices.filter(({ id }) => id !== voiceId) });
+          <SettingsInput label="Search voices" placeholder="Enter a name or language" disabled={unavailable} onChangeText={setSearch} />
+          <SettingsSelect label="Voice" value={values.voiceName} options={mainOptions}
+            hint={voiceLoading ? "Loading voices..." : !unavailable && !voices.isError && !matching.length ? "No matching voices" : undefined}
+            disabled={unavailable || !matching.length} onValueChange={(voiceName) => {
+              const voice = matching.find(({ id }) => id === voiceName);
+              if (voice) void edit({ voiceName, voiceLabel: voice.name, agentVoices: values.agentVoices.filter(({ id }) => id !== voiceName) });
             }} />
-          <SettingsAction label="Voice list" hint="Loads voices added in the ElevenLabs console"
+          <SettingsAction label="Voice list"
             actionLabel={refreshing ? "Refreshing..." : "Refresh"} disabled={unavailable || voices.isFetching}
             onPress={() => void queryClient.invalidateQueries({ queryKey: VOICES_QUERY })} />
           {voices.isError && !unavailable ? (
             <SettingsAction label="Could not load voices" error={voices.error.message} actionLabel="Retry"
               onPress={() => void voices.refetch()} />
           ) : null}
-          <SettingsSelect label="Model" value={values.model} options={MODELS} disabled={settings.saving}
-            onValueChange={(model) => void edit({ model })} />
           <SettingsSelect label="Speed" value={String(values.speed)} options={SPEEDS} disabled={settings.saving}
             onValueChange={(speed) => void edit({ speed: Number(speed) })} />
           {testAction}
         </SettingsCard>
       </SettingsSection>
       <VoiceModeControls theme={theme} />
-      {account.length && hasKey ? (
+      {hasKey ? (
         <SettingsSection title="Voices for other agents">
           <SettingsCard>
-            {account.map(({ id, name }) => (
-              <SettingsSwitch key={id} label={name} hint={id === values.voiceId ? "Main voice" : undefined}
-                value={id === values.voiceId || values.agentVoices.some((voice) => voice.id === id)}
-                disabled={unavailable || !values.voiceId || id === values.voiceId}
-                onValueChange={(enabled) => void edit({
-                  agentVoices: enabled ? [...values.agentVoices, { id, name }] : values.agentVoices.filter((voice) => voice.id !== id),
-                })} />
+            <SettingsSelect label="Add a voice" value="" options={extraOptions}
+              disabled={unavailable || !extraOptions.length || !values.voiceName}
+              onValueChange={(id) => {
+                const voice = matching.find((item) => item.id === id);
+                if (voice) void edit({ agentVoices: [...values.agentVoices, voice] });
+              }} />
+            {values.agentVoices.map(({ id, name }) => (
+              <SettingsSwitch key={id} label={name} value disabled={unavailable}
+                onValueChange={(enabled) => {
+                  if (!enabled) void edit({ agentVoices: values.agentVoices.filter((voice) => voice.id !== id) });
+                }} />
             ))}
           </SettingsCard>
         </SettingsSection>
@@ -324,7 +319,7 @@ export function createVoiceSettingsScreen(client: PluginClientContext) {
     const provider = settings.status === "ready" ? settings.values.provider : undefined;
     const options = status ? voiceSources(status.mode) : [];
     const selected = options.some(({ value }) => value === provider) ? provider : undefined;
-    const elevenLabs = personal && settings.status === "ready" && settings.values.provider === "elevenlabs";
+    const google = personal && settings.status === "ready" && settings.values.provider === "google";
 
     return (
       <>
@@ -344,7 +339,7 @@ export function createVoiceSettingsScreen(client: PluginClientContext) {
                   setTestError("");
                   void settings.save({ ...settings.values, provider }, settings.revision);
                 }} />
-              {!selected && provider === "elevenlabs" ? <Message theme={theme} text={DIRECT_VOICE_UNAVAILABLE} /> : null}
+              {!selected && provider === "google" ? <Message theme={theme} text={DIRECT_VOICE_UNAVAILABLE} /> : null}
               {!selected && provider === "managed" ? (
                 <Message theme={theme} text="Central voice is unavailable on this host. Choose a voice source above." />
               ) : null}
@@ -367,7 +362,7 @@ export function createVoiceSettingsScreen(client: PluginClientContext) {
         {status && status.mode !== "personal" && status.speakingProblem ? (
           <Message theme={theme} text={status.speakingProblem} error />
         ) : null}
-        {elevenLabs ? <ElevenLabsControls settings={settings} theme={theme} testAction={testAction} /> : null}
+        {google ? <GoogleControls settings={settings} theme={theme} testAction={testAction} /> : null}
         {status && status.mode !== "personal" && settings.status === "ready" && provider === "managed" ? (
           <ManagedVoiceControls status={status} hostId={host.id} settings={settings} theme={theme} />
         ) : null}

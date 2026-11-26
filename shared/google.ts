@@ -2,7 +2,7 @@ import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 
 export const DEFAULT_GOOGLE_VOICE = "en-US-Chirp3-HD-Charon";
-export const GOOGLE_VOICE_NAME = /^([a-z]{2,3}-[A-Z0-9]{2,3})-Chirp3-HD-(\w+)$/;
+export const GOOGLE_VOICE_NAME = /^([a-z]{2,3}-[a-z0-9]{2,3})-Chirp3-HD-(\w+)$/i;
 const googleVoice = z.object({ id: z.string(), name: z.string() });
 
 export const googleKeyStatus = defineRpc({

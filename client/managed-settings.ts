@@ -3,7 +3,7 @@ import type { VoiceSettings } from "../shared/settings";
 
 const personalSources = [
   { value: "paseo", label: "Paseo voice settings" },
-  { value: "elevenlabs", label: "ElevenLabs" },
+  { value: "google", label: "Google" },
 ] as const;
 const managedSources = [
   { value: "paseo", label: "Paseo voice settings (local)" },

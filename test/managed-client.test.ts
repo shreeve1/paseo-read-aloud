@@ -12,7 +12,7 @@ test("managed hosts offer central and local sources and ignore a device's saved 
   }
   assert.equal(shouldAutoRead(undefined, true), false);
   assert.equal(canTestVoice(undefined), false);
-  assert.deepEqual(voiceSources("personal").map(({ value }) => value), ["paseo", "elevenlabs"]);
+  assert.deepEqual(voiceSources("personal").map(({ value }) => value), ["paseo", "google"]);
   assert.equal(shouldAutoRead("personal", true), true);
   assert.equal(canTestVoice("personal"), true);
   assert.equal(shouldAutoRead("personal", false), false);

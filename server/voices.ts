@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { VoiceSettings } from "../shared/settings";
-import { readKey } from "./elevenlabs-key";
+import { readKey } from "./google-key";
 import { paseoHome } from "./paths";
 
 /**
@@ -32,7 +32,7 @@ interface VoiceSpec {
 export type ResolvedVoice =
   | { provider: "local"; modelId: string; label: string; dir: string; engine: TtsEngine; speakerId: number; speed: number }
   | { provider: "openai"; apiKey?: string; endpoint: string; model: string; voice: string }
-  | { provider: "elevenlabs"; apiKey?: string; voiceId: string; voiceName: string; model: string; speed: number };
+  | { provider: "google"; apiKey?: string; voiceName: string; voiceLabel: string; speed: number };
 
 const DEFAULT_LOCAL_TTS_MODEL = "kokoro-en-v0_19";
 
@@ -144,9 +144,9 @@ export function resolveOpenAiTtsKey(config: DaemonConfig, env: NodeJS.ProcessEnv
   return first(tts?.provider === "openai" ? tts.apiKey : undefined, env.OPENAI_TTS_API_KEY, env.OPENAI_API_KEY);
 }
 
-export function pickAgentVoice({ voiceId, voiceName, agentVoices }: VoiceSettings["elevenlabs"], agentId?: string) {
-  const main = { id: voiceId, name: voiceName };
-  if (!voiceId || !agentId || !agentVoices.length) return main;
+export function pickAgentVoice({ voiceName, voiceLabel, agentVoices }: VoiceSettings["google"], agentId?: string) {
+  const main = { id: voiceName, name: voiceLabel };
+  if (!voiceName || !agentId || !agentVoices.length) return main;
   let hash = 0;
   for (let i = 0; i < agentId.length; i++) hash = (Math.imul(31, hash) + agentId.charCodeAt(i)) >>> 0;
   return [main, ...agentVoices][hash % (agentVoices.length + 1)];
@@ -154,18 +154,17 @@ export function pickAgentVoice({ voiceId, voiceName, agentVoices }: VoiceSetting
 
 const LOCAL_VOICE_REQUIRED = "Only local voices are available for this request. Set Paseo Voice mode > Speaking to Local.";
 
-/** The plugin's ElevenLabs selection takes precedence over Paseo's speech settings. */
+/** The plugin's Google selection takes precedence over Paseo's speech settings. */
 export function resolveVoice(
   { env = process.env, config, settings, agentId, localOnly }: {
     env?: NodeJS.ProcessEnv; config?: DaemonConfig; settings?: VoiceSettings; agentId?: string; localOnly?: boolean;
   } = {},
 ): ResolvedVoice {
-  if (settings?.provider === "elevenlabs") {
+  if (settings?.provider === "google") {
     if (localOnly) throw new Error(LOCAL_VOICE_REQUIRED);
-    const { id: voiceId, name: voiceName } = pickAgentVoice(settings.elevenlabs, agentId);
+    const { id: voiceName, name: voiceLabel } = pickAgentVoice(settings.google, agentId);
     return {
-      provider: "elevenlabs", apiKey: readKey(env).apiKey, voiceId, voiceName,
-      model: settings.elevenlabs.model, speed: settings.elevenlabs.speed,
+      provider: "google", apiKey: readKey(env).apiKey, voiceName, voiceLabel, speed: settings.google.speed,
     };
   }
   config ??= readDaemonConfig();

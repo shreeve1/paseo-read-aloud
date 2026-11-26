@@ -3,15 +3,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { z } from "zod";
+import { GOOGLE_VOICE_NAME } from "../shared/google";
 import type { VoiceSettings } from "../shared/settings";
 import type { SpeechFile, SpeechRequest, VoiceStatus } from "../shared/speech";
-import { ELEVENLABS_API, ELEVENLABS_SETTINGS, elevenLabsError } from "./elevenlabs";
+import { GOOGLE_API, GOOGLE_SETTINGS, GoogleSpeechError, fetchGoogle } from "./google";
 import type { HubClient } from "./managed";
 import { readDaemonConfig, requiredFiles, resolveVoice, type ResolvedVoice, type TtsEngine } from "./voices";
 
 type LocalVoice = Extract<ResolvedVoice, { provider: "local" }>;
 type OpenAiVoice = Extract<ResolvedVoice, { provider: "openai" }>;
-type ElevenLabsVoice = Extract<ResolvedVoice, { provider: "elevenlabs" }>;
+type GoogleVoice = Extract<ResolvedVoice, { provider: "google" }>;
 
 const PLUGIN_ID = "read-aloud";
 
@@ -45,7 +47,6 @@ export async function cancel({ session }: { session: string }): Promise<{ ok: bo
 const REQUEST_TIMEOUT_MS = 60_000;
 const CLOUD_SAMPLE_RATE = 24_000;
 const mp3Endpoints = new Set<string>();
-const modelsWithoutContext = new Set<string>();
 
 async function withSpeechRequest<T>(
   provider: string, session: string | undefined, request: (signal: AbortSignal) => Promise<T>,
@@ -109,55 +110,44 @@ function openAiError(status: number, body: string): Error {
   return new Error(`OpenAI TTS request failed (${status})${detail ? ": " + detail : ""}`);
 }
 
-export type ElevenLabsAudioFormat = "pcm_24000" | "mp3_44100_128" | "wav_24000";
+export type GoogleAudioFormat = "PCM" | "MP3" | "LINEAR16";
+const googleAudio = z.object({ audioContent: z.base64().min(1) });
 
-export class ElevenLabsSpeechError extends Error {
-  readonly status: number;
-
-  constructor(status: number, message: string) {
-    super(message);
-    this.status = status;
-  }
-}
-
-export async function requestElevenLabs(
-  voice: Pick<ElevenLabsVoice, "apiKey" | "voiceId" | "model" | "speed">,
-  { text, session, previous, next, format, fetchSpeech = fetch, signal: consumerSignal }:
-    Pick<SpeechRequest, "text" | "session" | "previous" | "next"> & {
-      format: ElevenLabsAudioFormat; fetchSpeech?: typeof fetch; signal?: AbortSignal;
+export async function requestGoogle(
+  voice: Pick<GoogleVoice, "apiKey" | "voiceName" | "speed">,
+  { text, session, format, fetchSpeech = fetch, signal: consumerSignal }:
+    Pick<SpeechRequest, "text" | "session"> & {
+      format: GoogleAudioFormat; fetchSpeech?: typeof fetch; signal?: AbortSignal;
     },
-): Promise<ArrayBuffer> {
-  const { apiKey, voiceId, model, speed } = voice;
-  if (!apiKey) throw new ElevenLabsSpeechError(400, "No ElevenLabs API key is configured. " + ELEVENLABS_SETTINGS);
-  if (!voiceId) throw new ElevenLabsSpeechError(400, "Choose an ElevenLabs voice. " + ELEVENLABS_SETTINGS);
-  const url = `${ELEVENLABS_API}/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=${format}`;
-  const body = { text, model_id: model, voice_settings: { speed } };
-  return withSpeechRequest("ElevenLabs", session, async (signal) => {
-    const request = (context: boolean) => fetchSpeech(url, {
+): Promise<Buffer> {
+  const { apiKey, voiceName, speed } = voice;
+  if (!apiKey) throw new GoogleSpeechError(400, "No Google API key is configured. " + GOOGLE_SETTINGS);
+  const languageCode = GOOGLE_VOICE_NAME.exec(voiceName)?.[1];
+  if (!languageCode) throw new GoogleSpeechError(400, "Choose a Google Chirp 3 HD voice. " + GOOGLE_SETTINGS);
+  if (Buffer.byteLength(text, "utf8") > 5000) {
+    throw new GoogleSpeechError(400, "Google speech input exceeds 5,000 bytes. Send a shorter passage.");
+  }
+  const body = JSON.stringify({
+    input: { text },
+    voice: { languageCode, name: voiceName },
+    audioConfig: {
+      audioEncoding: format,
+      ...(format !== "MP3" ? { sampleRateHertz: CLOUD_SAMPLE_RATE } : {}),
+      speakingRate: speed,
+    },
+  });
+  return withSpeechRequest("Google", session, async (signal) => {
+    const response = await fetchGoogle(() => fetchSpeech(`${GOOGLE_API}/text:synthesize`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "xi-api-key": apiKey },
-      body: JSON.stringify(context ? { ...body, previous_text: previous, next_text: next } : body),
+      headers: { "Content-Type": "application/json", "X-Goog-Api-Key": apiKey },
+      body,
       signal: signal as RequestInit["signal"],
-    }).catch(() => { throw new Error("Could not reach ElevenLabs for speech"); });
-    const withContext = Boolean(previous || next) && !modelsWithoutContext.has(model);
-    let response = await request(withContext);
-    if (!response.ok) {
-      const detail = await response.text().catch(() => "");
-      if (withContext && (response.status === 400 || response.status === 422) && /\b(?:previous_text|next_text)\b/i.test(detail)) {
-        modelsWithoutContext.add(model);
-        response = await request(false);
-      } else {
-        throw speechError(response.status, detail, apiKey);
-      }
-    }
-    if (!response.ok) throw speechError(response.status, await response.text().catch(() => ""), apiKey);
-    return response.arrayBuffer().catch(() => { throw new Error("Could not read ElevenLabs audio"); });
+    }), "speech", signal);
+    const result = googleAudio.safeParse(await response.json().catch(() => null));
+    signal.throwIfAborted();
+    if (!result.success) throw new GoogleSpeechError(502, "Google returned invalid speech audio.");
+    return Buffer.from(result.data.audioContent, "base64");
   }, consumerSignal);
-}
-
-function speechError(status: number, detail: string, apiKey: string): ElevenLabsSpeechError {
-  return new ElevenLabsSpeechError(status === 401 || status === 429 ? status : 502,
-    elevenLabsError(status, detail, apiKey, true).message);
 }
 
 // ---------- Local voices ----------
@@ -366,6 +356,27 @@ function pcm16Clip(body: ArrayBuffer | Uint8Array): SpeechFile {
   return pcmClip(samples, CLOUD_SAMPLE_RATE);
 }
 
+function wavClip(audio: Buffer): SpeechFile {
+  if (audio.toString("ascii", 0, 4) === "RIFF" && audio.toString("ascii", 8, 12) === "WAVE") {
+    let bytesPerSecond = 0;
+    let dataSize: number | undefined;
+    // The fmt and data chunks are not necessarily adjacent.
+    for (let offset = 12; offset + 8 <= audio.length;) {
+      const chunk = audio.toString("ascii", offset, offset + 4);
+      const size = audio.readUInt32LE(offset + 4);
+      const start = offset + 8;
+      if (start + size > audio.length) break;
+      if (chunk === "fmt " && size >= 16) bytesPerSecond = audio.readUInt32LE(start + 8);
+      if (chunk === "data") dataSize = size;
+      if (bytesPerSecond && dataSize !== undefined) {
+        return { base64: audio.toString("base64"), mimeType: "audio/wav", durationMs: dataSize * 1000 / bytesPerSecond };
+      }
+      offset = start + size + (size % 2);
+    }
+  }
+  throw new Error("Google returned an invalid WAV file.");
+}
+
 export async function synthesizeManaged(
   hub: HubClient, voiceId: string, { text, session }: SpeechRequest,
 ): Promise<SpeechFile> {
@@ -395,7 +406,7 @@ export async function synthesize(input: SpeechRequest, settings?: VoiceSettings)
   const voice = resolveVoice({ settings, agentId, localOnly });
   switch (voice.provider) {
     case "openai": return synthesizeOpenAi(voice, text, session);
-    case "elevenlabs": return pcm16Clip(await requestElevenLabs(voice, { ...input, format: "pcm_24000" }));
+    case "google": return wavClip(await requestGoogle(voice, { text, session, format: "LINEAR16" }));
     case "local": return synthesizeLocal(voice, text, session);
   }
 }
@@ -418,13 +429,13 @@ export async function checkVoice(settings?: VoiceSettings, { localOnly = false }
         "Tap this warning again to re-check."],
     };
   }
-  if (voice.provider === "elevenlabs") {
-    const label = voice.voiceName || voice.voiceId || "ElevenLabs";
-    const problem = !voice.apiKey ? "No ElevenLabs API key is configured."
-      : !voice.voiceId ? "No ElevenLabs voice is selected." : undefined;
+  if (voice.provider === "google") {
+    const label = voice.voiceLabel || voice.voiceName || "Google";
+    const problem = !voice.apiKey ? "No Google API key is configured."
+      : !GOOGLE_VOICE_NAME.test(voice.voiceName) ? "No Google Chirp 3 HD voice is selected." : undefined;
     return problem
-      ? { ok: false, voice: label, provider: "elevenlabs", problem, steps: [ELEVENLABS_SETTINGS] }
-      : { ok: true, voice: label, provider: "elevenlabs" };
+      ? { ok: false, voice: label, provider: "google", problem, steps: [GOOGLE_SETTINGS] }
+      : { ok: true, voice: label, provider: "google" };
   }
   if (voice.provider === "openai") {
     if (voice.apiKey) return { ok: true, voice: `OpenAI ${voice.voice}`, provider: "openai" };

@@ -1,5 +1,5 @@
 import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin/server";
-import { elevenLabsClearKey, elevenLabsKeyStatus, elevenLabsSaveKey, elevenLabsVoices } from "./shared/elevenlabs";
+import { googleClearKey, googleKeyStatus, googleSaveKey, googleVoices } from "./shared/google";
 import { DIRECT_VOICE_UNAVAILABLE, managedStatus, managedVoices, type ManagedStatus } from "./shared/managed";
 import { voiceSettings, type VoiceSettings } from "./shared/settings";
 import { cancelSpeech, synthesizeSpeech, voiceStatus, type SpeechFile, type SpeechRequest, type VoiceStatus } from "./shared/speech";
@@ -9,7 +9,7 @@ import { HubError, loadMode, withLocalOption, type Mode } from "./server/managed
 import { addReadAloudRow } from "./server/reply-row";
 import { startSpeechBridge } from "./server/speech-bridge";
 import { cancel, checkVoice, disposeEngine, synthesize, synthesizeManaged } from "./server/tts";
-import { keyStatus, listVoices, removeKey, validateAndSaveKey } from "./server/elevenlabs";
+import { keyStatus, listVoices, removeKey, validateAndSaveKey } from "./server/google";
 import { createVoiceModeControls, restoreManagedSpeaking } from "./server/voice-mode";
 
 type SpeechHandlers = {
@@ -29,14 +29,14 @@ function centralStatus(problem?: string, voice = "Central voice"): VoiceStatus {
 function registerPersonal(
   server: PluginServerContext, getSettings: () => Promise<VoiceSettings | undefined>,
 ): SpeechHandlers {
-  const bridge = startSpeechBridge({ getSettings: async () => (await getSettings())?.elevenlabs });
+  const bridge = startSpeechBridge({ getSettings: async () => (await getSettings())?.google });
   const voiceMode = createVoiceModeControls({ bridge });
   server.handle(voiceModeStatus, (_input, { paseo }) => voiceMode.status(paseo.config));
   server.handle(voiceModeConnect, ({ enabled }, { paseo }) => voiceMode.connect(paseo.config, enabled));
-  server.handle(elevenLabsKeyStatus, keyStatus);
-  server.handle(elevenLabsSaveKey, validateAndSaveKey);
-  server.handle(elevenLabsClearKey, removeKey);
-  server.handle(elevenLabsVoices, listVoices);
+  server.handle(googleKeyStatus, keyStatus);
+  server.handle(googleSaveKey, validateAndSaveKey);
+  server.handle(googleClearKey, removeKey);
+  server.handle(googleVoices, listVoices);
 
   return {
     async status(settings) {
@@ -59,7 +59,7 @@ function registerManaged(server: PluginServerContext, mode: Exclude<Mode, { kind
   });
   return {
     async status(settings) {
-      if (settings?.provider === "elevenlabs") return centralStatus(withLocalOption(DIRECT_VOICE_UNAVAILABLE));
+      if (settings?.provider === "google") return centralStatus(withLocalOption(DIRECT_VOICE_UNAVAILABLE));
       if (settings?.provider !== "managed") return checkVoice(undefined, { localOnly: true });
       if (mode.kind === "managed-unavailable") return centralStatus(mode.reason);
       if (!settings.managed.voiceId) return centralStatus(CHOOSE_CENTRAL_VOICE);
@@ -71,7 +71,7 @@ function registerManaged(server: PluginServerContext, mode: Exclude<Mode, { kind
     },
     async synthesize(input, settings) {
       if (input.manual !== true || input.automatic || input.localOnly) throw new Error(MANUAL_PLAYBACK_ONLY);
-      if (settings?.provider === "elevenlabs") throw new Error(withLocalOption(DIRECT_VOICE_UNAVAILABLE));
+      if (settings?.provider === "google") throw new Error(withLocalOption(DIRECT_VOICE_UNAVAILABLE));
       if (settings?.provider !== "managed") return synthesize({ ...input, localOnly: true });
       if (mode.kind === "managed-unavailable") throw new Error(mode.reason);
       if (!settings.managed.voiceId) throw new Error(CHOOSE_CENTRAL_VOICE);

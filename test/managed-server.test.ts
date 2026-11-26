@@ -22,7 +22,7 @@ function plugin(t: TestContext, mode: Mode, provider: VoiceSettings["provider"],
   type Handler = (input: unknown, context: { paseo: { config: unknown } }) => Promise<unknown>;
   const handlers = new Map<string, Handler>();
   let state = { status: "ready", revision: "1", values: voiceSettings.schema.parse({
-    provider, managed: { voiceId: "one", voiceName: "First" }, elevenlabs: { voiceId: "old" },
+    provider, managed: { voiceId: "one", voiceName: "First" }, google: {},
   }) };
   let listener: (value: typeof state) => void;
   const context = {
@@ -52,7 +52,7 @@ function plugin(t: TestContext, mode: Mode, provider: VoiceSettings["provider"],
   };
 }
 
-test("personal registration starts the bridge and exposes Voice mode and ElevenLabs controls", async (t) => {
+test("personal registration starts the bridge and exposes Voice mode and Google controls", async (t) => {
   const listen = Server.prototype.listen;
   const listening = t.mock.method(Server.prototype, "listen", function (this: Server, options: object) {
     return Reflect.apply(listen, this, [{ ...options, port: 0 }]);
@@ -60,7 +60,7 @@ test("personal registration starts the bridge and exposes Voice mode and ElevenL
   const config = speakingConfig({ provider: "local" });
   const server = plugin(t, { kind: "personal" }, "paseo", config);
   assert.deepEqual([...server.handlers.keys()].sort(), [
-    "elevenlabs.clear-key", "elevenlabs.key-status", "elevenlabs.save-key", "elevenlabs.voices",
+    "google.clear-key", "google.key-status", "google.save-key", "google.voices",
     "managed.status", "speech.cancel", "speech.status", "speech.synthesize", "voice-mode.connect", "voice-mode.status",
   ]);
   const bridge = listening.mock.calls[0]?.this;
@@ -119,19 +119,19 @@ function overrideEnv(t: TestContext, key: string, value: string) {
   });
 }
 
-test("the managed handler table exposes neither direct ElevenLabs nor the Voice mode bridge", async (t) => {
+test("the managed handler table exposes neither direct Google nor the Voice mode bridge", async (t) => {
   const { mode, requests } = await mockHub(t, () => assert.fail("Unexpected request"));
   const listening = t.mock.method(Server.prototype, "listen");
   const fetch = t.mock.method(globalThis, "fetch", async () => assert.fail("Unexpected fetch"));
 
   for (const hostMode of [mode, { kind: "managed-unavailable", reason: "Check the host certificate." }] as const) {
-    const server = plugin(t, hostMode, "elevenlabs");
+    const server = plugin(t, hostMode, "google");
     assert.deepEqual([...server.handlers.keys()].sort(), [
       "managed.status", "managed.voices", "speech.cancel", "speech.status", "speech.synthesize",
     ]);
     const status = managedStatus.output.parse(await server.call(managedStatus.name));
     assert.equal(status.mode, hostMode.kind);
-    assert.match(voiceStatus.output.parse(await server.call(voiceStatus.name)).problem ?? "", /Direct ElevenLabs/);
+    assert.match(voiceStatus.output.parse(await server.call(voiceStatus.name)).problem ?? "", /Direct Google/);
     await assert.rejects(server.call(synthesizeSpeech.name, { text, manual: true }), /Choose Central voice.*local playback/);
     if (hostMode.kind === "managed-unavailable") {
       await assert.rejects(server.call(managedVoices.name), /Check the host certificate/);

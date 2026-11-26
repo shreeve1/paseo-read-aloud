@@ -2,15 +2,15 @@ import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { z } from "zod";
 import type { VoiceSettings } from "../shared/settings";
-import { readKey } from "./elevenlabs-key";
+import { readKey } from "./google-key";
 import { paseoHome } from "./paths";
-import { ElevenLabsSpeechError, requestElevenLabs, type ElevenLabsAudioFormat } from "./tts";
+import { GoogleSpeechError } from "./google";
+import { requestGoogle, type GoogleAudioFormat } from "./tts";
 import { readDaemonConfig, resolveOpenAiTtsKey } from "./voices";
 
 const HOST = "127.0.0.1";
 export const LEGACY_BRIDGE_KEY = "read-aloud-bridge";
 const MAX_BODY_BYTES = 64 * 1024;
-const CONTEXT_MS = 20_000;
 
 export function bridgePort(env = process.env, uid = process.getuid?.() ?? 0) {
   const override = env.READ_ALOUD_BRIDGE_PORT?.trim();
@@ -27,10 +27,10 @@ const speechInput = z.object({
 });
 
 const formats = {
-  pcm: { format: "pcm_24000", contentType: "audio/pcm" },
-  mp3: { format: "mp3_44100_128", contentType: "audio/mpeg" },
-  wav: { format: "wav_24000", contentType: "audio/wav" },
-} satisfies Record<z.output<typeof speechInput>["response_format"], { format: ElevenLabsAudioFormat; contentType: string }>;
+  pcm: { format: "PCM", contentType: "audio/pcm" },
+  mp3: { format: "MP3", contentType: "audio/mpeg" },
+  wav: { format: "LINEAR16", contentType: "audio/wav" },
+} satisfies Record<z.output<typeof speechInput>["response_format"], { format: GoogleAudioFormat; contentType: string }>;
 
 function sendError(res: ServerResponse, status: number, message: string) {
   if (res.destroyed) return;
@@ -67,15 +67,13 @@ export function speechBridgeUrl(port = bridgePort()) {
 }
 
 export function startSpeechBridge({
-  getSettings, env = process.env, port = bridgePort(env), fetchSpeech, now = Date.now,
+  getSettings, env = process.env, port = bridgePort(env), fetchSpeech,
 }: {
-  getSettings: () => Promise<VoiceSettings["elevenlabs"] | undefined>;
+  getSettings: () => Promise<VoiceSettings["google"] | undefined>;
   port?: number;
   fetchSpeech?: typeof fetch;
   env?: NodeJS.ProcessEnv;
-  now?: () => number;
 }) {
-  let last: { input: string; time: number } | undefined;
   let error: string | undefined;
   const lifetime = new AbortController();
   const home = paseoHome(env);
@@ -114,25 +112,22 @@ export function startSpeechBridge({
     const { format, contentType } = formats[response_format];
     const settings = await getSettings();
     const { apiKey } = readKey(env);
-    const time = now();
-    const previous = last && time - last.time < CONTEXT_MS ? last.input : undefined;
-    last = { input, time };
     const consumer = new AbortController();
     res.once("close", () => consumer.abort());
     if (res.destroyed) return;
-    const audio = await requestElevenLabs({
-      apiKey, voiceId: settings?.voiceId ?? "", model: settings?.model ?? "", speed: settings?.speed ?? 1,
-    }, { text: input, previous, format, fetchSpeech, signal: consumer.signal });
+    const audio = await requestGoogle({
+      apiKey, voiceName: settings?.voiceName ?? "", speed: settings?.speed ?? 1,
+    }, { text: input, format, fetchSpeech, signal: consumer.signal });
     res.writeHead(200, { "Content-Type": contentType });
-    res.end(Buffer.from(audio));
+    res.end(audio);
   }
 
   const server = createServer((req, res) => {
     void speak(req, res).catch((cause: unknown) => {
-      if (cause instanceof ElevenLabsSpeechError && cause.status !== 502) {
+      if (cause instanceof GoogleSpeechError) {
         return sendError(res, cause.status, cause.message);
       }
-      sendError(res, 502, "Could not generate speech with ElevenLabs.");
+      sendError(res, 502, "Could not generate speech with Google.");
     });
   });
   server.on("error", (cause: NodeJS.ErrnoException) => {

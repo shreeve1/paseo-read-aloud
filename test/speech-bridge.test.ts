@@ -8,16 +8,16 @@ import { bridgePort, startSpeechBridge } from "../server/speech-bridge.ts";
 import { voiceSettings } from "../shared/settings.ts";
 
 const settings = voiceSettings.schema.parse({
-  provider: "elevenlabs",
-  elevenlabs: { voiceId: "main/voice", speed: 1.1, agentVoices: [{ id: "other", name: "Other" }] },
-}).elevenlabs;
-const env = { PASEO_HOME: import.meta.dirname, ELEVENLABS_API_KEY: "fake-key", OPENAI_TTS_API_KEY: "test-tts-key" };
+  provider: "google",
+  google: { voiceName: "en-US-Chirp3-HD-Charon", speed: 1.1, agentVoices: [{ id: "en-US-Chirp3-HD-Kore", name: "Kore" }] },
+}).google;
+const env = { PASEO_HOME: import.meta.dirname, GOOGLE_TTS_API_KEY: "fake-key", OPENAI_TTS_API_KEY: "test-tts-key" };
 const authorization = { Authorization: `Bearer ${env.OPENAI_TTS_API_KEY}` };
 const bytes = Uint8Array.of(0, 0, 7, 123, 255, 253);
 const errorBody = z.object({ error: z.object({ message: z.string(), type: z.string() }) });
 
 async function openBridge(t: TestContext, options: Partial<Parameters<typeof startSpeechBridge>[0]> = {}) {
-  const upstream = t.mock.fn<typeof fetch>(async () => new Response(bytes));
+  const upstream = t.mock.fn<typeof fetch>(async () => Response.json({ audioContent: Buffer.from(bytes).toString("base64") }));
   const bridge = startSpeechBridge({
     getSettings: async () => settings, port: 0, env, fetchSpeech: upstream, ...options,
   });
@@ -94,7 +94,7 @@ test("the bridge prompts to reconnect when no private key is configured", async 
   const home = fs.mkdtempSync(path.join(import.meta.dirname, ".bridge-test-"));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const { bridge, upstream } = await openBridge(t, {
-    env: { PASEO_HOME: home, ELEVENLABS_API_KEY: env.ELEVENLABS_API_KEY },
+    env: { PASEO_HOME: home, GOOGLE_TTS_API_KEY: env.GOOGLE_TTS_API_KEY },
   });
   for (const key of [undefined, "read-aloud-bridge"]) {
     if (key) fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({
@@ -114,10 +114,10 @@ test("the bridge prompts to reconnect when no private key is configured", async 
 test("the bridge sends the main voice and returns the requested audio bytes unchanged", async (t) => {
   const { speak, upstream } = await openBridge(t);
   for (const [format, upstreamFormat, contentType] of [
-    ["pcm", "pcm_24000", "audio/pcm"],
-    ["mp3", "mp3_44100_128", "audio/mpeg"],
-    [undefined, "mp3_44100_128", "audio/mpeg"],
-    ["wav", "wav_24000", "audio/wav"],
+    ["pcm", "PCM", "audio/pcm"],
+    ["mp3", "MP3", "audio/mpeg"],
+    [undefined, "MP3", "audio/mpeg"],
+    ["wav", "LINEAR16", "audio/wav"],
   ]) {
     const response = await speak({ input: "Hello", response_format: format, voice: "ignored", model: "ignored" });
     assert.equal(response.status, 200);
@@ -126,29 +126,22 @@ test("the bridge sends the main voice and returns the requested audio bytes unch
     const call = upstream.mock.calls.at(-1);
     assert.ok(call);
     const [url, init] = call.arguments;
-    assert.equal(url, `https://api.elevenlabs.io/v1/text-to-speech/main%2Fvoice?output_format=${upstreamFormat}`);
-    assert.equal(new Headers(init?.headers).get("xi-api-key"), env.ELEVENLABS_API_KEY);
+    assert.equal(url, "https://texttospeech.googleapis.com/v1/text:synthesize");
+    assert.equal(new Headers(init?.headers).get("X-Goog-Api-Key"), env.GOOGLE_TTS_API_KEY);
     const body = JSON.parse(String(init?.body));
-    assert.equal(body.text, "Hello");
-    assert.equal(body.model_id, settings.model);
-    assert.deepEqual(body.voice_settings, { speed: 1.1 });
+    assert.deepEqual(body, {
+      input: { text: "Hello" },
+      voice: { languageCode: "en-US", name: settings.voiceName },
+      audioConfig: {
+        audioEncoding: upstreamFormat,
+        ...(upstreamFormat !== "MP3" ? { sampleRateHertz: 24_000 } : {}),
+        speakingRate: 1.1,
+      },
+    });
   }
 });
 
-test("continuity uses only the previous request and expires at 20 seconds", async (t) => {
-  let time = 1;
-  const { speak, upstream } = await openBridge(t, { now: () => time });
-  for (const [input, delay] of [["First", 0], ["Second", 19_999], ["Third", 20_000], ["Fourth", 1]] as const) {
-    time += delay;
-    const response = await speak({ input });
-    assert.equal(response.status, 200);
-    await response.arrayBuffer();
-  }
-  const bodies = upstream.mock.calls.map(({ arguments: [, init] }) => JSON.parse(String(init?.body)));
-  assert.deepEqual(bodies.map((body) => body.previous_text), [undefined, "First", undefined, "Third"]);
-});
-
-test("invalid routes, methods, JSON, formats and oversized requests do not call ElevenLabs", async (t) => {
+test("invalid routes, methods, JSON, formats and oversized requests do not call Google", async (t) => {
   const { base, speak, upstream } = await openBridge(t);
   const url = base + "/v1/audio/speech";
   const responses = [
@@ -158,6 +151,7 @@ test("invalid routes, methods, JSON, formats and oversized requests do not call 
     [400, await speak({ input: "Hello", response_format: "opus" })],
     [400, await speak({ input: " " })],
     [400, await speak({ input: "\u00e9".repeat(32 * 1024) })],
+    [400, await speak({ input: "\u00e9".repeat(2501) })],
     [403, await fetch(url, { method: "POST", headers: { ...authorization, Origin: "https://example.test" }, body: '{"input":"hello"}' })],
   ] as const;
   for (const [status, response] of responses) {
@@ -173,9 +167,9 @@ test("invalid routes, methods, JSON, formats and oversized requests do not call 
 test("bridge errors name missing settings and never expose the upstream key", async (t) => {
   let status = 401;
   const testEnv: NodeJS.ProcessEnv = { ...env };
-  let voiceId = settings.voiceId;
+  let voiceName = settings.voiceName;
   const { speak } = await openBridge(t, {
-    env: testEnv, getSettings: async () => ({ ...settings, voiceId }),
+    env: testEnv, getSettings: async () => ({ ...settings, voiceName }),
     fetchSpeech: async () => new Response("Upstream error: fake-key", { status }),
   });
   for (const [upstream, expected, type] of [
@@ -188,14 +182,14 @@ test("bridge errors name missing settings and never expose the upstream key", as
     assert.equal(error.type, type);
     assert.doesNotMatch(error.message, /fake-key/);
   }
-  voiceId = "";
-  for (const setting of [/Choose an ElevenLabs voice/, /No ElevenLabs API key/]) {
+  voiceName = "";
+  for (const setting of [/Choose a Google Chirp 3 HD voice/, /No Google API key/]) {
     const response = await speak({ input: "Hello" });
     assert.equal(response.status, 400);
     const { error } = errorBody.parse(await response.json());
     assert.match(error.message, setting);
     assert.match(error.message, /Settings.*Read Aloud/);
-    delete testEnv.ELEVENLABS_API_KEY;
+    delete testEnv.GOOGLE_TTS_API_KEY;
   }
 });
 

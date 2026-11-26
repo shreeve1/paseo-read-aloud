@@ -18,4 +18,4 @@ export const managedVoices = defineRpc({
   output: z.object({ voices: z.array(z.object({ id: z.string(), name: z.string() })) }),
 });
 
-export const DIRECT_VOICE_UNAVAILABLE = "Direct ElevenLabs voices are unavailable on this managed host. Choose Central voice.";
+export const DIRECT_VOICE_UNAVAILABLE = "Direct Google voices are unavailable on this managed host. Choose Central voice.";
